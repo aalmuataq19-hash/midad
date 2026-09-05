@@ -1,0 +1,13 @@
+{
+  "name": "midad-al-qadi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "مِداد القاضي — مساحة العمل الذكية لدراسة القضية",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
