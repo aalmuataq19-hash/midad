@@ -6,13 +6,16 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-const PORT = parseInt(process.env.PORT || "10000", 10);
+const num = (v, def, min, max) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= min && n <= max ? n : def; };
+const PORT = num(process.env.PORT, 10000, 1, 65535);
 const KEY = (process.env.ANTHROPIC_API_KEY || "").trim();
 const PASS = (process.env.ACCESS_PASSWORD || "").trim();
-const ALLOWED = (process.env.ALLOWED_MODELS || "claude-sonnet-5,claude-opus-5,claude-fable-5-1,claude-haiku-4-5-20251001,claude-sonnet-4-6")
-  .split(",").map((s) => s.trim()).filter(Boolean);
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "8000", 10);
-const RATE = parseInt(process.env.RATE_LIMIT_PER_MINUTE || "30", 10);
+const DEFAULT_MODELS = "claude-sonnet-5,claude-opus-5,claude-fable-5-1,claude-haiku-4-5-20251001,claude-sonnet-4-6";
+const parseModels = (v) => String(v || "").split(",").map((s) => s.trim()).filter(Boolean);
+// قائمة فارغة أو معطوبة كانت تُرسل model = undefined فيرفضه Anthropic.
+const ALLOWED = parseModels(process.env.ALLOWED_MODELS).length ? parseModels(process.env.ALLOWED_MODELS) : parseModels(DEFAULT_MODELS);
+const MAX_TOKENS = num(process.env.MAX_TOKENS, 8000, 256, 200000);
+const RATE = num(process.env.RATE_LIMIT_PER_MINUTE, 30, 0, 100000);
 const MAX_BODY = 64 * 1024 * 1024;
 const UPSTREAM = "https://api.anthropic.com/v1/messages";
 
@@ -35,8 +38,12 @@ function safeEqual(a, b) {
   return A.length === B.length && crypto.timingSafeEqual(A, B);
 }
 function send(res, code, body, type = "application/json; charset=utf-8", extra = {}) {
-  res.writeHead(code, { "Content-Type": type, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store", ...extra });
-  res.end(body);
+  // لا تكتب مرتين: الاتصال قد يكون أُغلق أو أُرسل رد قبله، وذلك يرفع استثناءً يُسقط الخدمة.
+  if (res.headersSent || res.writableEnded || res.destroyed) return;
+  try {
+    res.writeHead(code, { "Content-Type": type, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store", ...extra });
+    res.end(body);
+  } catch (e) { console.error("send failed:", e.message); }
 }
 function json(res, code, obj) { send(res, code, JSON.stringify(obj)); }
 function fail(res, code, type, message) { json(res, code, { type: "error", error: { type, message } }); }
@@ -66,7 +73,7 @@ async function handleApi(req, res, url) {
   try { body = JSON.parse(raw); } catch { return fail(res, 400, "midad_request", "صيغة الطلب غير صحيحة."); }
   if (!body || typeof body !== "object" || !Array.isArray(body.messages)) return fail(res, 400, "midad_request", "الطلب يفتقد messages.");
   if (!ALLOWED.includes(body.model)) body.model = ALLOWED[0];
-  body.max_tokens = Math.max(256, Math.min(parseInt(body.max_tokens || 4000, 10) || 4000, MAX_TOKENS));
+  body.max_tokens = Math.min(num(body.max_tokens, 4000, 256, 200000), MAX_TOKENS);
   delete body.stream; delete body.metadata;
 
   const ctrl = new AbortController();
@@ -103,11 +110,17 @@ function serveStatic(req, res, url) {
 }
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, "http://localhost");
+  let url;
+  // مسار مشوّه في الطلب كان يرفع استثناءً غير ملتقط داخل معالج الطلبات.
+  try { url = new URL(req.url, "http://localhost"); } catch { return send(res, 400, "bad request", "text/plain; charset=utf-8"); }
   if (url.pathname === "/api" || url.pathname === "/api.php") return handleApi(req, res, url).catch((e) => fail(res, 500, "midad_server", e.message));
   if (url.pathname === "/healthz") return send(res, 200, "ok", "text/plain; charset=utf-8");
   return serveStatic(req, res, url);
 });
+server.on("clientError", (err, socket) => { if (!socket.destroyed) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"); });
+// خطأ في طلب واحد يجب ألا يُسقط الخدمة على Render ويقطع التحليل الجاري.
+process.on("unhandledRejection", (e) => console.error("unhandledRejection:", (e && e.message) || e));
+process.on("uncaughtException", (e) => console.error("uncaughtException:", (e && e.stack) || e));
 server.requestTimeout = 300000;
 server.headersTimeout = 305000;
 server.keepAliveTimeout = 65000;
