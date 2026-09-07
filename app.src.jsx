@@ -589,7 +589,7 @@ function Progress({ status, errs = {} }) {
 
 /* ───────────────────────── إنشاء قضية ───────────────────────── */
 function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
-  const [f, setF] = useState({ number: "", court: "", circuit: "", type: "تجارية", plaintiff: "", defendant: "", subject: "" });
+  const [f, setF] = useState({ number: "", court: "", circuit: "", type: "تجارية", plaintiff: "", defendant: "", subject: "", systems: [] });
   const [files, setFiles] = useState([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -616,7 +616,7 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
       if (unsaved.length) { setBusy(false); setErr(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح (قد تكون ممتلئة). احذف قضية قديمة أو قلّل حجم الملفات ثم أعد المحاولة.`); for (const fl of files) await sdel(`midad:file:${id}:${fl.id}`); return; }
       const st = [];
       const er = {};
-        const a = await runStages(files, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw, f.type);
+        const a = await runStages(files, caseStatutes(f, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw, f.type);
       const meta = a.meta || {};
       const merged = { ...c, number: c.number || meta.number || "", court: c.court || meta.court || "", circuit: c.circuit || meta.circuit || "", subject: c.subject || meta.subject || "", analysis: a };
       onCreated(merged);
@@ -653,6 +653,20 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
         </div>
         <Field label="موضوع الدعوى" value={f.subject} onChange={set("subject")} />
         <div className="text-xs" style={{ color: C.mute }}>ما تتركه فارغًا يحاول مِداد استخراجه من الملف.</div>
+        {bySystem(library.statutes).length > 0 && (
+          <div>
+            <span className="text-sm block mb-2" style={{ color: C.mute }}>الأنظمة المعتمدة في هذه القضية</span>
+            <div className="space-y-1">
+              {bySystem(library.statutes).map(({ system, items }) => (
+                <label key={system} className="flex items-start gap-2 text-sm cursor-pointer rounded-lg px-3 py-2" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+                  <input type="checkbox" checked={f.systems.includes(system)} onChange={() => setF((x) => ({ ...x, systems: x.systems.includes(system) ? x.systems.filter((v) => v !== system) : [...x.systems, system] }))} className="mt-1.5" />
+                  <span className="leading-7">{system} <span className="text-xs" style={{ color: C.mute }}>({arNum(items.length)} مادة)</span></span>
+                </label>
+              ))}
+            </div>
+            <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>لن يُرسل إلى النموذج إلا ما تؤشّر عليه هنا. تقدر تغيّره لاحقًا من قسم النصوص النظامية.</span>
+          </div>
+        )}
 
         <div className="text-sm font-semibold pt-4">ملفات القضية</div>
         <div onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
@@ -726,7 +740,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
     if (unsaved.length) setToast(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح.`);
     const prevA = c.analysis;
     const er = {};
-    const res = await runStages(all, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw, c.type);
+    const res = await runStages(all, caseStatutes(c, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw, c.type);
     let whatsNew = c.whatsNew;
     if (prevA?.done && prevA.summary && newFiles.length) {
       try {
@@ -1169,45 +1183,201 @@ function Issues({ a, c, update, openSrc, library, setNote, setToast }) {
 }
 
 /* ───────────────────────── ٨. النصوص النظامية ───────────────────────── */
-function Laws({ library, setLibrary, a, reanalyze, setToast }) {
+// تجميع المواد بحسب النظام: مكتبة بمئات المواد لا تُعرض بطاقةً بطاقة.
+function bySystem(statutes) {
+  const m = new Map();
+  for (const s of statutes || []) {
+    const k = String(s.system || "بلا نظام").trim();
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(s);
+  }
+  return [...m.entries()].map(([system, items]) => ({ system, items }));
+}
+// لا يُرسل إلى النموذج إلا ما اعتمده القاضي في هذه القضية. الافتراضي: لا شيء.
+function caseStatutes(c, library) {
+  const picked = c && Array.isArray(c.systems) ? c.systems : [];
+  if (!picked.length) return [];
+  return (library && library.statutes || []).filter((s) => picked.includes(String(s.system || "بلا نظام").trim()));
+}
+const LIB_HELP = "الملف بصيغة JSON، وكل مادة فيه: ref (المادة) وsystem (النظام) وtext (النص)، ويمكن معها version وeffective.";
+
+function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState({});
+  const [add, setAdd] = useState(false);
+  const [form, setForm] = useState({});
+  const [confirmDel, setConfirmDel] = useState(null);
+  const impRef = useRef();
+  const groups = bySystem(library.statutes);
+  const picked = Array.isArray(c.systems) ? c.systems : [];
+  const sentCount = caseStatutes(c, library).length;
+  const usedIn = (st) => (a.issues || []).filter((it) => (it.laws || []).some((l) => l.ref && st.ref && l.ref.includes(st.ref))).map((it) => it.title);
+
+  const toggleSystem = (sys) => update((x) => {
+    const cur = Array.isArray(x.systems) ? x.systems : [];
+    return { ...x, systems: cur.includes(sys) ? cur.filter((v) => v !== sys) : [...cur, sys] };
+  });
+
+  const saveOne = () => {
+    if (!form.ref || !form.system || !form.text) { setToast("أكمل المادة والنظام والنص."); return; }
+    setLibrary((l) => ({ ...l, statutes: [...(l.statutes || []), { id: uid(), ...form }] }));
+    setAdd(false); setForm({});
+    setToast("أُضيفت المادة. اعتمد نظامها في هذه القضية ثم أعد التحليل.");
+  };
+
+  const exportLib = () => {
+    const data = JSON.stringify({ midad: "library", version: 1, at: Date.now(), statutes: library.statutes || [], principles: library.principles || [] }, null, 1);
+    const blob = new Blob(["\ufeff", data], { type: "application/json;charset=utf-8" });
+    const u = URL.createObjectURL(blob); const el = document.createElement("a");
+    el.href = u; el.download = `مكتبة-مداد-${new Date().toISOString().slice(0, 10)}.json`; el.click(); URL.revokeObjectURL(u);
+    setToast("نُزّلت نسخة من مكتبتك.");
+  };
+
+  const importLib = async (file) => {
+    if (!file) return;
+    try {
+      if (file.size > 12 * 1024 * 1024) throw new Error("الملف أكبر من ١٢ ميجابايت.");
+      let j; try { j = JSON.parse((await file.text()).replace(/^\ufeff/, "")); } catch { throw new Error("الملف ليس JSON صالحًا. " + LIB_HELP); }
+      const inSt = Array.isArray(j) ? j : (j && j.statutes) || [];
+      const inPr = Array.isArray(j) ? [] : (j && j.principles) || [];
+      const clean = inSt.filter((x) => x && x.ref && x.system && x.text).map((x) => ({
+        id: uid(), ref: String(x.ref).trim(), system: String(x.system).trim(), text: String(x.text).trim(),
+        version: String(x.version || "").trim(), effective: String(x.effective || "").trim(),
+      }));
+      if (!clean.length) throw new Error("لم يُعثر في الملف على مواد. " + LIB_HELP);
+      const have = new Set((library.statutes || []).map((x) => `${x.system}|${x.ref}`));
+      const fresh = clean.filter((x) => !have.has(`${x.system}|${x.ref}`));
+      const prHave = new Set((library.principles || []).map((x) => x.title));
+      const prFresh = inPr.filter((p) => p && p.title && p.text && !prHave.has(p.title))
+        .map((p) => ({ id: uid(), title: String(p.title), text: String(p.text), source: String(p.source || ""), cat: String(p.cat || "إثبات") }));
+      if (!fresh.length && !prFresh.length) { setToast("كل ما في الملف موجود في مكتبتك أصلًا."); return; }
+      setLibrary((l) => ({ statutes: [...(l.statutes || []), ...fresh], principles: [...(l.principles || []), ...prFresh] }));
+      const skipped = clean.length - fresh.length;
+      setToast(`استُوردت ${arNum(fresh.length)} مادة${prFresh.length ? ` و${arNum(prFresh.length)} مبدأ` : ""}${skipped ? `، وتُخطّيت ${arNum(skipped)} موجودة` : ""}. اعتمد ما يخص هذه القضية ثم أعد التحليل.`);
+    } catch (e) { setToast((e && e.message) || "تعذر استيراد الملف."); }
+  };
+
+  const deleteSystem = (sys) => {
+    setLibrary((l) => ({ ...l, statutes: (l.statutes || []).filter((x) => String(x.system || "بلا نظام").trim() !== sys) }));
+    update((x) => ({ ...x, systems: (x.systems || []).filter((v) => v !== sys) }));
+    setConfirmDel(null);
+    setToast(`حُذف «${sys}» من مكتبتك.`);
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <Btn small kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={14} /> استورد نصوصًا</Btn>
+        <Btn small kind="ghost" onClick={exportLib} disabled={!(library.statutes || []).length && !(library.principles || []).length}><Download size={14} /> صدّر مكتبتي</Btn>
+        <Btn small onClick={() => { setForm({}); setAdd(true); }}><Plus size={14} /> أضف مادة</Btn>
+        <input ref={impRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importLib(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+      </div>
+
+      {groups.length === 0 ? (
+        <Empty>مكتبتك فارغة. استورد ملف أنظمة، أو أضف مادة واحدة يدويًا. ولن يستشهد مِداد بأي مادة لم تضعها أنت.</Empty>
+      ) : (
+        <>
+          <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: sentCount ? C.accSoft : C.amberSoft, color: sentCount ? C.acc : C.amber }}>
+            {sentCount
+              ? `المعتمد في هذه القضية: ${arNum(picked.length)} نظام، ${arNum(sentCount)} مادة. لن يُرسل إلى النموذج غيرها.`
+              : "لم تعتمد أي نظام في هذه القضية بعد، فلن تُرسل أي مادة إلى النموذج وسيبقى قسم النصوص في المسائل فارغًا. أشّر على ما يخص هذه القضية أدناه."}
+          </div>
+          <div className="relative mb-4">
+            <Search size={14} className="absolute top-2.5 right-3" style={{ color: C.mute }} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث في نص المواد أو أرقامها…" className="w-full rounded-lg pr-9 pl-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }} />
+          </div>
+          {groups.map(({ system, items }) => {
+            const hits = q ? items.filter((x) => `${x.ref} ${x.text}`.includes(q)) : items;
+            if (q && !hits.length) return null;
+            const isOpen = q ? true : !!open[system];
+            const shown = hits.slice(0, 40);
+            const on = picked.includes(system);
+            return (
+              <Card key={system} className="mb-3">
+                <div className="flex items-start justify-between gap-3">
+                  <label className="flex items-start gap-2 cursor-pointer flex-1">
+                    <input type="checkbox" checked={on} onChange={() => toggleSystem(system)} className="mt-1.5" />
+                    <span>
+                      <span className="font-semibold block leading-7">{system}</span>
+                      <span className="text-xs" style={{ color: C.mute }}>
+                        {arNum(items.length)} مادة{q ? ` — ${arNum(hits.length)} مطابقة للبحث` : ""} — {on ? "معتمد في هذه القضية" : "غير معتمد"}
+                      </span>
+                    </span>
+                  </label>
+                  <button onClick={() => setConfirmDel(system)} title="احذف هذا النظام من مكتبتك" style={{ color: C.mute }}><Trash2 size={15} /></button>
+                </div>
+                <div className="flex items-center gap-3 mt-3 text-xs">
+                  <button onClick={() => setOpen((o) => ({ ...o, [system]: !o[system] }))} className="underline decoration-dotted" style={{ color: C.acc }}>
+                    {isOpen ? "أخفِ المواد" : "اعرض المواد"}
+                  </button>
+                  {isOpen && hits.length > shown.length && <span style={{ color: C.mute }}>يُعرض {arNum(shown.length)} من {arNum(hits.length)} — استخدم البحث للوصول إلى البقية.</span>}
+                </div>
+                {isOpen && shown.map((st) => (
+                  <div key={st.id} className="mt-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="text-sm font-medium">{st.ref}</div>
+                      <button onClick={() => setLibrary((l) => ({ ...l, statutes: (l.statutes || []).filter((x) => x.id !== st.id) }))} style={{ color: C.mute }}><X size={13} /></button>
+                    </div>
+                    {(st.version || st.effective) && <div className="text-xs" style={{ color: C.mute }}>{st.version ? `النسخة: ${st.version}` : ""}{st.effective ? ` — النفاذ: ${st.effective}` : ""}</div>}
+                    <div className="rounded-lg p-3 mt-1 text-sm leading-7" style={{ background: C.grey, borderRight: `3px solid ${C.acc}` }}>{st.text}</div>
+                    {usedIn(st).length > 0 && <div className="text-xs mt-1 px-1" style={{ color: C.mute }}>ورد ارتباطه في: {usedIn(st).join("، ")}</div>}
+                  </div>
+                ))}
+              </Card>
+            );
+          })}
+          <Btn kind="ghost" small onClick={() => reanalyze([])}><RefreshCw size={14} /> أعد التحليل بالأنظمة المعتمدة</Btn>
+        </>
+      )}
+
+      {add && (
+        <Modal title="أضف مادة" onClose={() => setAdd(false)}>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3"><Field label="المادة" value={form.ref || ""} onChange={(v) => setForm({ ...form, ref: v })} placeholder="المادة (٤١)" /><Field label="النظام" value={form.system || ""} onChange={(v) => setForm({ ...form, system: v })} placeholder="نظام المعاملات المدنية" /></div>
+            <div className="grid grid-cols-2 gap-3"><Field label="النسخة" value={form.version || ""} onChange={(v) => setForm({ ...form, version: v })} /><Field label="تاريخ النفاذ" value={form.effective || ""} onChange={(v) => setForm({ ...form, effective: v })} placeholder="١٤٤٤/٠٦/١٩" /></div>
+            <Field textarea rows={5} label="نص المادة" value={form.text || ""} onChange={(v) => setForm({ ...form, text: v })} />
+            <div className="flex gap-3 pt-2"><Btn onClick={saveOne}>حفظ</Btn><Btn kind="ghost" onClick={() => setAdd(false)}>إلغاء</Btn></div>
+          </div>
+        </Modal>
+      )}
+      {confirmDel && (
+        <Modal title="حذف نظام من المكتبة" onClose={() => setConfirmDel(null)}>
+          <p className="text-sm leading-7 mb-4">سيُحذف «{confirmDel}» بكل مواده ({arNum(bySystem(library.statutes).find((g) => g.system === confirmDel)?.items.length || 0)} مادة) من مكتبتك في هذا المتصفح، ومن كل قضاياك. لا يمكن التراجع، فصدّر مكتبتك أولًا إن أردت نسخة.</p>
+          <div className="flex gap-3">
+            <button onClick={() => deleteSystem(confirmDel)} className="px-4 py-2 rounded-lg text-sm text-white" style={{ background: C.copper }}>احذف نهائيًا</button>
+            <Btn kind="ghost" onClick={() => setConfirmDel(null)}>إلغاء</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function Laws({ c, update, library, setLibrary, a, reanalyze, setToast }) {
   const [tab, setTab] = useState("statutes");
-  const [add, setAdd] = useState(null);
+  const [add, setAdd] = useState(false);
   const [form, setForm] = useState({});
   const [q, setQ] = useState(""); const [cat, setCat] = useState("");
   const cats = ["إثبات", "إجراءات", "عقود", "عقوبات"];
-  const save = () => {
-    if (add === "statute") { if (!form.ref || !form.system || !form.text) { setToast("أكمل المادة والنظام والنص."); return; } setLibrary((l) => ({ ...l, statutes: [...l.statutes, { id: uid(), ...form }] })); setToast("أُضيف النص. أعد التحليل ليُستخدم في ربط المسائل."); }
-    else { if (!form.title || !form.text) { setToast("أكمل العنوان والنص."); return; } setLibrary((l) => ({ ...l, principles: [...l.principles, { id: uid(), cat: form.cat || cats[0], ...form }] })); }
-    setAdd(null); setForm({});
+  const savePrinciple = () => {
+    if (!form.title || !form.text) { setToast("أكمل العنوان والنص."); return; }
+    setLibrary((l) => ({ ...l, principles: [...(l.principles || []), { id: uid(), cat: form.cat || cats[0], ...form }] }));
+    setAdd(false); setForm({});
   };
-  const usedIn = (s) => (a.issues || []).filter((it) => (it.laws || []).some((l) => l.ref?.includes(s.ref))).map((it) => it.title);
   return (
     <div>
-      <H sub="لا يستخدم مِداد في التحليل إلا النصوص التي تضيفها هنا.">النصوص النظامية</H>
+      <H sub="لا يستخدم مِداد في التحليل إلا النصوص التي تضيفها هنا وتعتمدها في هذه القضية.">النصوص النظامية</H>
       <div className="flex gap-1 mb-6 rounded-lg p-1 w-fit" style={{ background: C.grey }}>
         {[["statutes", "الأنظمة"], ["principles", "مكتبتي الشخصية"]].map(([k, l]) => <button key={k} onClick={() => setTab(k)} className="px-4 py-1.5 rounded-md text-sm" style={{ background: tab === k ? C.card : "transparent", fontWeight: tab === k ? 600 : 400 }}>{l}</button>)}
       </div>
       {tab === "statutes" ? (
-        <div>
-          <div className="flex items-center justify-between mb-4"><div className="text-sm" style={{ color: C.mute }}>{library.statutes.length ? `${arNum(library.statutes.length)} نص مضاف` : "لا نصوص مضافة بعد."}</div><Btn small onClick={() => { setForm({}); setAdd("statute"); }}><Plus size={14} /> أضف نظامًا</Btn></div>
-          {library.statutes.map((s) => (
-            <Card key={s.id} className="mb-3">
-              <div className="flex items-start justify-between gap-3">
-                <div><div className="font-semibold">{s.ref} — {s.system}</div><div className="text-xs mt-1" style={{ color: C.mute }}>{s.version ? `النسخة: ${s.version}` : ""}{s.effective ? ` — تاريخ النفاذ: ${s.effective}` : ""}</div></div>
-                <button onClick={() => setLibrary((l) => ({ ...l, statutes: l.statutes.filter((x) => x.id !== s.id) }))} style={{ color: C.mute }}><Trash2 size={15} /></button>
-              </div>
-              <div className="rounded-lg p-3 mt-3 text-sm leading-7" style={{ background: C.grey, borderRight: `3px solid ${C.acc}` }}><div className="text-xs mb-1" style={{ color: C.mute }}>النص النظامي</div>{s.text}</div>
-              <div className="rounded-lg p-3 mt-2 text-sm leading-7" style={{ background: C.card, border: `1px solid ${C.line}` }}><div className="text-xs mb-1" style={{ color: C.mute }}>تحليل مِداد</div>{usedIn(s).length ? `ورد ارتباطه في: ${usedIn(s).join("، ")}` : "لم يُربط بمسألة في التحليل الحالي."}</div>
-            </Card>
-          ))}
-          {library.statutes.length > 0 && <Btn kind="ghost" small onClick={() => reanalyze([])}><RefreshCw size={14} /> أعد التحليل لاستخدام النصوص</Btn>}
-        </div>
+        <StatutesTab c={c} update={update} library={library} setLibrary={setLibrary} a={a} reanalyze={reanalyze} setToast={setToast} />
       ) : (
         <div>
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <div className="relative flex-1" style={{ minWidth: 192 }}><Search size={14} className="absolute top-2.5 right-3" style={{ color: C.mute }} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث في مبادئك…" className="w-full rounded-lg pr-9 pl-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }} /></div>
             {["", ...cats].map((k) => <button key={k} onClick={() => setCat(k)} className="text-xs px-3 py-1.5 rounded-full" style={{ background: cat === k ? C.acc : C.grey, color: cat === k ? "#fff" : C.mute }}>{k || "الكل"}</button>)}
-            <Btn small onClick={() => { setForm({ cat: cats[0] }); setAdd("principle"); }}><Plus size={14} /> إضافة مبدأ</Btn>
+            <Btn small onClick={() => { setForm({ cat: cats[0] }); setAdd(true); }}><Plus size={14} /> إضافة مبدأ</Btn>
           </div>
           <div className="text-xs mb-4" style={{ color: C.mute }}>مكتبة خاصة بك، مستقلة عن القضايا، تبقى معك في كل ملف.</div>
           {library.principles.filter((p) => (!cat || p.cat === cat) && (!q || `${p.title} ${p.text} ${p.source}`.includes(q))).map((p) => (
@@ -1221,19 +1391,13 @@ function Laws({ library, setLibrary, a, reanalyze, setToast }) {
         </div>
       )}
       {add && (
-        <Modal title={add === "statute" ? "أضف نظامًا" : "إضافة مبدأ"} onClose={() => setAdd(null)}>
+        <Modal title="إضافة مبدأ" onClose={() => setAdd(false)}>
           <div className="space-y-3">
-            {add === "statute" ? (<>
-              <div className="grid grid-cols-2 gap-3"><Field label="المادة" value={form.ref || ""} onChange={(v) => setForm({ ...form, ref: v })} placeholder="المادة (٤١)" /><Field label="النظام" value={form.system || ""} onChange={(v) => setForm({ ...form, system: v })} placeholder="نظام المعاملات المدنية" /></div>
-              <div className="grid grid-cols-2 gap-3"><Field label="النسخة" value={form.version || ""} onChange={(v) => setForm({ ...form, version: v })} /><Field label="تاريخ النفاذ" value={form.effective || ""} onChange={(v) => setForm({ ...form, effective: v })} placeholder="١٤٤٤/٠٦/١٩" /></div>
-              <Field textarea rows={5} label="نص المادة" value={form.text || ""} onChange={(v) => setForm({ ...form, text: v })} />
-            </>) : (<>
-              <Field label="عنوان المبدأ" value={form.title || ""} onChange={(v) => setForm({ ...form, title: v })} />
-              <Field textarea rows={4} label="نص المبدأ أو ملخص الحكم" value={form.text || ""} onChange={(v) => setForm({ ...form, text: v })} />
-              <Field label="المصدر" value={form.source || ""} onChange={(v) => setForm({ ...form, source: v })} placeholder="رقم الحكم — المحكمة — السنة" />
-              <label className="block"><span className="text-sm block mb-1" style={{ color: C.mute }}>التصنيف</span><select value={form.cat || cats[0]} onChange={(e) => setForm({ ...form, cat: e.target.value })} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }}>{cats.map((k) => <option key={k}>{k}</option>)}</select></label>
-            </>)}
-            <div className="flex gap-3 pt-2"><Btn onClick={save}>حفظ</Btn><Btn kind="ghost" onClick={() => setAdd(null)}>إلغاء</Btn></div>
+            <Field label="عنوان المبدأ" value={form.title || ""} onChange={(v) => setForm({ ...form, title: v })} />
+            <Field textarea rows={4} label="نص المبدأ أو ملخص الحكم" value={form.text || ""} onChange={(v) => setForm({ ...form, text: v })} />
+            <Field label="المصدر" value={form.source || ""} onChange={(v) => setForm({ ...form, source: v })} placeholder="رقم الحكم — المحكمة — السنة" />
+            <label className="block"><span className="text-sm block mb-1" style={{ color: C.mute }}>التصنيف</span><select value={form.cat || cats[0]} onChange={(e) => setForm({ ...form, cat: e.target.value })} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }}>{cats.map((k) => <option key={k}>{k}</option>)}</select></label>
+            <div className="flex gap-3 pt-2"><Btn onClick={savePrinciple}>حفظ</Btn><Btn kind="ghost" onClick={() => setAdd(false)}>إلغاء</Btn></div>
           </div>
         </Modal>
       )}
