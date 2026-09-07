@@ -198,27 +198,72 @@ const AR_D = "٠١٢٣٤٥٦٧٨٩";
 function maskNumbers(t, min, keep) {
   return String(t).replace(new RegExp(`[0-9${AR_D}]{${min},}`, "g"), (m) => "*".repeat(m.length - keep) + m.slice(-keep));
 }
+/* استخراج نصوص PDF يقطع الكلمة بسطر ويبدّل شكل الحرف، فمطابقة الاسم حرفيًا تُفلت
+   «المط\nيرى» و«بشرى\nعبدالرحيم». لذلك تُبنى المطابقة على الحروف: بين كل حرفين فراغٌ
+   محتمل، والحروف المتشابهة تُقبل بأشكالها كلها. */
+const AR_EQ = [["اأإآٱ"], ["يىئ"], ["هة"], ["وؤ"]];
+const ARLET = "\\u0621-\\u063A\\u0640-\\u064A\\u0671-\\u06D3";
+const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function looseWord(w) {
+  return w.split("").map((ch) => {
+    const g = AR_EQ.find(([set]) => set.includes(ch));
+    return g ? `[${g[0]}]` : esc(ch);
+  }).join("\\s*");
+}
+const NSEP = "(?:\\s+(?:بن|بنت))?\\s+";
+const nameParts = (full) => full.split(/\s+/).filter((w) => w && w !== "بن" && w !== "بنت");
 function maskNames(t, names) {
   let out = String(t);
   // ١) الأسماء الكاملة أولًا، من الأطول إلى الأقصر
   for (const full of [...names].sort((a, b) => b.length - a.length)) {
-    const parts = full.split(/\s+/).filter((w) => w && w !== "بن" && w !== "بنت");
+    const parts = nameParts(full);
     if (parts.length < 3) continue;
-    out = out.split(full).join(`${parts[0]} ${parts[1]} ****`);
+    const re = new RegExp(parts.map(looseWord).join(NSEP), "g");
+    out = out.replace(re, `${parts[0]} ${parts[1]} ****`);
   }
-  // ٢) ما بقي من ألقاب العائلة في صيغ مختصرة، أينما وردت
-  // لقب العائلة وحده يُكنس، لا كل ما بعد الاسم الثاني: فقد يكون اسمًا أول لشخص آخر في القضية.
-  const tails = new Set();
+  // ٢) ما بقي من أجزاء الاسم المستورة في صيغ مختصرة أو مبعثرة، أينما وردت.
+  // الاستخراج المعكوس يفصل الاسم الأول عن بقيته، فلا تكفي مطابقة الاسم كاملًا.
+  // ويُستثنى جزءٌ هو أولُ اسمٍ لطرفٍ آخر في القضية: ستْرُه يمحو اسمًا من حقه الظهور.
+  const tails = new Set(), kept = new Set();
   for (const full of names) {
-    const parts = full.split(/\s+/).filter((w) => w && w !== "بن" && w !== "بنت");
-    if (parts.length >= 3) tails.add(parts[parts.length - 1]);
+    const parts = nameParts(full);
+    for (const p of parts.slice(0, 2)) kept.add(p);
+  }
+  for (const full of names) {
+    const parts = nameParts(full);
+    if (parts.length >= 3) for (const p of parts.slice(2)) if (!kept.has(p)) tails.add(p);
   }
   for (const tail of [...tails].sort((a, b) => b.length - a.length)) {
-    out = out.replace(new RegExp(`(?:\\s(?:بن|بنت))?\\s?${tail}(?![\\u0621-\\u063A\\u0640-\\u064A\\u0671-\\u06D3])`, "g"), " ****");
+    out = out.replace(new RegExp(`(?:\\s+(?:بن|بنت))?\\s*${looseWord(tail)}(?![${ARLET}])`, "g"), " ****");
   }
-  // ٣) اجمع علامات الأسماء المتتالية فقط. لا تمسّ نجوم الأرقام (لا فراغ بينها وبين الخانات).
+  // ٣) شظايا اللقب: الاستخراج قد يمزّق الكلمة نصفين ويقحم بينهما نصًّا آخر، فيفلت
+  // «المط» من «المطيري». تُستر بداية اللقب إذا وقفت كلمةً كاملةً وحدها، ولا تُمسّ
+  // «المطالبة» لأن حروفها تتصل بعدها.
+  for (const tail of [...tails].filter((x) => x.length >= 5)) {
+    for (let k = tail.length - 1; k >= 3; k--) {
+      const frag = tail.slice(0, k);
+      out = out.replace(new RegExp(`(^|[^${ARLET}])${looseWord(frag)}(?![${ARLET}])`, "g"), "$1****");
+    }
+  }
+  // ٤) اجمع علامات الأسماء المتتالية فقط. لا تمسّ نجوم الأرقام (لا فراغ بينها وبين الخانات).
   out = out.replace(/(\*{4})(?:\s+\*{4})+/g, "****");
-  return out.replace(/[ \t]{2,}/g, " ").replace(/\s+([،.,:؛)])/g, "$1").trim();
+  return out.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+([،.,:؛)])/g, "$1").trim();
+}
+/* شبكة أمان: بعد الحجب لا يجوز أن يبقى أثرٌ لأي جزء كان يجب ستره. */
+function leftovers(text, names) {
+  const out = [];
+  const want = new Set(), keptElsewhere = new Set();
+  for (const full of names) {
+    const parts = nameParts(full);
+    for (const p of parts.slice(2)) want.add(p);
+    for (const p of parts.slice(0, 2)) keptElsewhere.add(p);
+  }
+  // جزءٌ مستورٌ في اسمٍ لكنه أولُ اسمٍ لطرفٍ آخر يبقى ظاهرًا بحقّه، فلا يُبلَّغ عنه
+  for (const w of want) {
+    if (keptElsewhere.has(w)) continue;
+    if (new RegExp(`${looseWord(w)}(?![${ARLET}])`).test(text)) out.push(w);
+  }
+  return out;
 }
 function redact(file, opts) {
   const a = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -238,9 +283,12 @@ function redact(file, opts) {
   const out = walk(a);
   out.redacted = { at: Date.now(), rule: `أرقام من ${opts.min} خانة فأكثر: يبقى آخر ${opts.keep}؛ والأسماء: يبقى أول اسمين` };
   fs.writeFileSync(file, JSON.stringify(out, null, 1));
-  return { nNum, nName };
+  return { nNum, nName, left: leftovers(JSON.stringify(out), opts.names) };
 }
+module.exports = { maskNames, maskNumbers, leftovers, merge, check, redact };
+
 /* ───────── الواجهة ───────── */
+if (require.main !== module) return;
 const [cmd, ...rest] = process.argv.slice(2);
 try {
   if (cmd === "prompt") { console.log(printPrompt(rest[0], rest[1], rest[2])); }
@@ -272,6 +320,8 @@ try {
     const keep = +((rest.find((x) => x.startsWith("--keep=")) || "--keep=3").replace("--keep=", ""));
     const r = redact(rest[0], { names, min, keep });
     console.log(`حُجبت الأرقام في ${r.nNum} نصًا، والأسماء في ${r.nName} نصًا.`);
+    if (r.left.length) console.log(`✗ بقيت أجزاء أسماء كان يجب حجبها: ${r.left.join("، ")} — راجع الملف قبل تسليمه.`);
+    else console.log("✓ لم يبقَ أي جزء من الأسماء المطلوب حجبها.");
     const c = check(rest[0]);
     console.log(c.problems.length ? "مشكلات: " + c.problems.join(" | ") : "✓ البنية سليمة بعد الحجب.");
   }
