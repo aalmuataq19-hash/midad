@@ -153,8 +153,10 @@ function check(file) {
   for (const [i, e] of (a.evidence || []).entries()) {
     if (e.purpose && !String(e.purpose).startsWith("يراد به بحسب المذكرة")) notes.push(`صف الأدلة ${i + 1}: الغرض لا يبدأ بـ«يراد به بحسب المذكرة»`);
   }
-  // ألفاظ محظورة في كل النصوص
+  // ألفاظ محظورة في نثر التحليل. تُستثنى الاقتباسات الحرفية: المستند قد يحوي اللفظ،
+  // ونقلُه كما ورد أمانة لا مخالفة. المخالفة أن يكتبه النموذج من عنده.
   const walk = (v, p) => {
+    if (/\.quote$/.test(p)) return;
     if (typeof v === "string") { for (const w of BANNED) if (v.includes(w)) problems.push(`لفظ محظور «${w}» في ${p}`); }
     else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`));
     else if (v && typeof v === "object") for (const k of Object.keys(v)) walk(v[k], `${p}.${k}`);
