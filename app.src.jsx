@@ -185,6 +185,30 @@ function fileBlocks(files, sendRaw = false, cache = true) {
   if (cache && out.length) out[out.length - 1] = { ...out[out.length - 1], cache_control: { type: "ephemeral" } };
   return out;
 }
+/* الفهرسة على مرحلتين: يُعرض على النموذج فهرسٌ بأرقام المواد وأبوابها بلا متون، فيسمّي
+   المرشّح منها، ثم تُرسل متون المختارة وحدها إلى مرحلة المسائل. مكتبة بـ٨٥٠ مادة تنزل
+   بذلك من نحو ٣٤٧ ألف حرف في كل تحليل إلى نحو ٦٤ ألفًا. */
+const IDX_MIN = 60;        // دون هذا العدد لا يستحق الأمر طلبًا إضافيًا
+const IDX_MAX_PICKS = 40;
+async function pickStatutes(statutes, brief) {
+  if (statutes.length <= IDX_MIN) return { picked: statutes, indexed: false, from: statutes.length };
+  const index = statutes.map((x, i) => `${i + 1}. ${x.ref} — ${x.system}${lastPart(x.path) ? ` — ${lastPart(x.path)}` : ""}`).join("\n");
+  const text = `هذه مسائل قضية وما ورد فيها من طلبات ودفوع:
+${JSON.stringify(brief)}
+
+وهذا فهرس النصوص النظامية التي أضافها القاضي واعتمدها في هذه القضية، بأرقامها وأبوابها بلا متونها:
+${index}
+
+اختر أرقام المواد التي قد ترتبط بمسائل هذه القضية، ورتّبها من الأقرب صلة، ولا تتجاوز ${IDX_MAX_PICKS} رقمًا.
+اختر من هذا الفهرس وحده، ولا تذكر رقمًا ليس فيه. هذا اختيارٌ لما يُعرض على القاضي، وليس ترجيحًا ولا حكمًا ولا تقييمًا.
+إن لم يظهر لك ارتباط فأعد مصفوفة فارغة، ولا تملأها بالتخمين.
+أعد JSON بهذا الشكل بالضبط: {"picks":[1,2,3]}`;
+  const out = await pjOrFix(await llm(SYS, [{ type: "text", text, cache_control: { type: "ephemeral" } }], 4000));
+  const nums = (out.picks || []).map((v) => parseInt(v, 10)).filter((v) => Number.isFinite(v) && v >= 1 && v <= statutes.length);
+  return { picked: [...new Set(nums)].slice(0, IDX_MAX_PICKS).map((v) => statutes[v - 1]), indexed: true, from: statutes.length };
+}
+const EXTRA_LABELS = { lawpick: "اختيار النصوص النظامية المرتبطة" };
+const stageLabel = (k) => ((STAGES.find((x) => x[0] === k) || [])[1]) || EXTRA_LABELS[k] || k;
 const STAGES = [
   ["overview", "قراءة الملفات وصورة القضية"], ["facts", "استخراج الوقائع"],
   ["reqdef", "الطلبات والدفوع"], ["evidence", "الأدلة والمستندات"],
@@ -545,7 +569,26 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, c
     const [key] = STAGES[i];
     onStage(i, "run");
     try {
-      const ctx = { issues: (a.issues || []).map((x) => x.title), statutes, caseType };
+      let use = statutes;
+      if (key === "issues" && statutes.length) {
+        const brief = {
+          مسائل: (a.issues || []).map((x) => x.title),
+          دفوع: (a.defenses || []).map((x) => x.text),
+          "طلبات المدعي": (a.pl || []).map((x) => x.text),
+          "طلبات المدعى عليه": (a.df || []).map((x) => x.text),
+        };
+        try {
+          const r = await pickStatutes(statutes, brief);
+          use = r.picked;
+          a.lawPick = { from: r.from, to: use.length, indexed: r.indexed, at: Date.now() };
+        } catch (e) {
+          // لا تُرسل المكتبة كاملة عند الفشل: تكلفة مفاجئة بلا إذن. تُترك فارغة ويُعلن السبب.
+          a.errors.lawpick = (e && e.message) || String(e);
+          use = [];
+          a.lawPick = { from: statutes.length, to: 0, indexed: true, failed: true, at: Date.now() };
+        }
+      }
+      const ctx = { issues: (a.issues || []).map((x) => x.title), statutes: use, caseType };
       const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 8000));
       if (key === "overview") { a.summary = out.summary; a.parties = out.parties || []; a.issues = (out.issues || []).map((x) => ({ title: x.title })); a.meta = out.meta || {}; }
       else if (key === "facts") a.facts = out.facts || [];
@@ -818,7 +861,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
             <>
               {a.errors && Object.keys(a.errors).length > 0 && (
                 <div className="rounded-lg p-4 mb-6 text-sm" style={{ background: C.amberSoft, color: C.amber }}>
-                  <div className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" /><div className="leading-7">تعذر إكمال: {Object.keys(a.errors).map((k) => STAGES.find((s) => s[0] === k)?.[1]).join("، ")}.</div></div>
+                  <div className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" /><div className="leading-7">تعذر إكمال: {Object.keys(a.errors).map((k) => stageLabel(k)).join("، ")}.</div></div>
                   <div className="text-xs mt-2 leading-6 rounded p-2" style={{ background: "rgba(255,255,255,0.6)", color: C.copper }}>سبب الخطأ: {Object.values(a.errors)[0]}</div>
                   <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
                     <button className="underline" onClick={() => reanalyze([])}>أعد التحليل</button>
@@ -1303,9 +1346,18 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
               ? "لم تعتمد أي نظام في هذه القضية بعد، فلن تُرسل أي مادة إلى النموذج وسيبقى قسم النصوص في المسائل فارغًا. أشّر على ما يخص هذه القضية أدناه."
               : <>
                   المعتمد في هذه القضية: {arNum(picked.length)} نظام، {arNum(sentCount)} مادة، نحو {arNum(Math.round(sentChars / 1000))} ألف حرف تُرسل مع كل تحليل. لن يُرسل غيرها.
-                  {heavy && <span className="block mt-1">هذا حجم كبير: يرفع تكلفة كل تحليل ويصعّب على النموذج تمييز المادة المناسبة. اعتمد ما يخص هذه القضية وحدها.</span>}
+                  {heavy && !a.lawPick && <span className="block mt-1">هذا حجم كبير: يرفع تكلفة كل تحليل ويصعّب على النموذج تمييز المادة المناسبة. اعتمد ما يخص هذه القضية وحدها.</span>}
                 </>}
           </div>
+          {a.lawPick && (
+            <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: C.card, border: `1px solid ${C.line}`, color: C.ink }}>
+              {a.lawPick.failed
+                ? <span style={{ color: C.copper }}>تعذر اختيار النصوص في آخر تحليل، فلم تُرسل أي مادة وبقي قسم النصوص في المسائل فارغًا. أعد التحليل.</span>
+                : a.lawPick.indexed
+                  ? <>في آخر تحليل عُرض على مِداد فهرس <b>{arNum(a.lawPick.from)}</b> مادة بأرقامها وأبوابها بلا متونها، فاختار منها <b>{arNum(a.lawPick.to)}</b> وأُرسلت متونها وحدها. ما لم يُختر لم يُرسل ولم يُستشهد به.</>
+                  : <>مكتبة هذه القضية {arNum(a.lawPick.from)} مادة، وهي أقل من أن تحتاج فهرسة، فأُرسلت كاملة.</>}
+            </div>
+          )}
           <div className="relative mb-4">
             <Search size={14} className="absolute top-2.5 right-3" style={{ color: C.mute }} />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث في نص المواد وأبوابها وأرقامها…" className="w-full rounded-lg pr-9 pl-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }} />
