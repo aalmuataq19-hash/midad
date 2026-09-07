@@ -129,7 +129,9 @@ async function llm(system, content, maxTokens = 4000) {
         headers: proxy
           ? { "Content-Type": "application/json", "x-midad-pass": pass }
           : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-        body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0, system, messages: [{ role: "user", content }] }),
+        // لا تُرسل temperature: ألغتها النماذج الحديثة (Sonnet 5 وOpus 5 وFable 5.1) وترد
+        // «temperature is deprecated for this model» وتفشل الطلب. النماذج الأقدم تقبل غيابها.
+        body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
       });
       const raw = await res.text();
       let data; try { data = JSON.parse(raw); } catch { throw Object.assign(new Error(`استجابة غير مفهومة (${res.status}): ${raw.slice(0, 120)}`), { final: true }); }
@@ -533,7 +535,7 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false) {
     onStage(i, "run");
     try {
       const ctx = { issues: (a.issues || []).map((x) => x.title), statutes };
-      const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 6000));
+      const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 8000));
       if (key === "overview") { a.summary = out.summary; a.parties = out.parties || []; a.issues = (out.issues || []).map((x) => ({ title: x.title })); a.meta = out.meta || {}; }
       else if (key === "facts") a.facts = out.facts || [];
       else if (key === "reqdef") { a.pl = out.pl || []; a.df = out.df || []; a.defenses = out.defenses || []; }
@@ -1456,7 +1458,7 @@ function AskBar({ c, loadFiles, update, openSrc }) {
 أعد JSON بهذا الشكل بالضبط: {"answer":"","items":[{"text":"المقطع حرفيًا","src":{"doc":"","page":0,"quote":""}}],"notFound":false}`
         : `السؤال: ${question}\nأجب من ملفات القضية المرفقة حصرًا. answer فقرة قصيرة واضحة. items: كل معلومة في الإجابة مع مصدرها الدقيق ومقتبس حرفي قصير. إن لم تجد الإجابة في الملفات فاجعل notFound صحيحًا وanswer فارغًا، ولا تخمّن.
 أعد JSON بهذا الشكل بالضبط: {"answer":"","items":[{"text":"","src":{"doc":"","page":0,"quote":""}}],"notFound":false}`;
-      const out = await pjOrFix(await llm(SYS, [...fileBlocks(files, c.sendRaw), { type: "text", text: prompt }], 3000));
+      const out = await pjOrFix(await llm(SYS, [...fileBlocks(files, c.sendRaw), { type: "text", text: prompt }], 4000));
       update((x) => ({ ...x, chat: [...(x.chat || []), { role: "a", ...out, literal }] }));
     } catch (e) { update((x) => ({ ...x, chat: [...(x.chat || []), { role: "a", error: e.message }] })); }
     setBusy(false);
