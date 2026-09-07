@@ -1,0 +1,58 @@
+# نشر مِداد القاضي على Render عند كل دفع على main.
+# يحتاج سرًّا واحدًا في GitHub باسم RENDER_DEPLOY_HOOK يحمل رابط Deploy Hook من Render.
+# لا يُكتب الرابط هنا أبدًا لأن المستودع عام.
+name: نشر على Render
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: تثبيت الاعتماديات
+        run: npm ci
+
+      - name: اختبارات الوحدة
+        run: npm test
+
+      - name: التأكد أن app.js مطابق لما يتولد من app.src.jsx
+        run: |
+          cp app.js /tmp/app.committed.js
+          npm run build
+          if ! diff -q /tmp/app.committed.js app.js > /dev/null; then
+            echo "::error::app.js لا يطابق ناتج بناء app.src.jsx. شغّل npm run build وارفع الملفين معًا."
+            exit 1
+          fi
+          echo "app.js مطابق."
+
+      - name: فحص أن الأسرار ليست في المستودع
+        run: |
+          if grep -rIn --exclude-dir=.git --exclude-dir=node_modules -E "sk-ant-[A-Za-z0-9_-]{20,}" . ; then
+            echo "::error::يبدو أن مفتاح API مكتوب داخل المستودع. أزله فورًا وأنشئ مفتاحًا جديدًا."
+            exit 1
+          fi
+          echo "لا مفاتيح في المستودع."
+
+      - name: طلب النشر من Render
+        if: success()
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::لم يُضبط السر RENDER_DEPLOY_HOOK، فلم يُطلب النشر."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/hook.out -w "%{http_code}" "$HOOK")
+          echo "رد Render: $code"
+          cat /tmp/hook.out
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then exit 1; fi
+          echo "أُرسل طلب النشر إلى Render."
