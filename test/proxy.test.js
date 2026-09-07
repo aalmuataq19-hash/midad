@@ -40,6 +40,8 @@ const post = async (body) => {
   return { res, sent, upstream: JSON.parse(sent.body) };
 };
 
+// يحاكي ما يرسله متصفح بقي على نسخة قديمة من app.js: ما زال يضع temperature،
+// فكل اختبار في هذا الملف يمر ضمنًا على مسار الحذف الدفاعي.
 const withDocs = (extra = {}) => ({
   model: "claude-sonnet-5",
   max_tokens: 6000,
@@ -68,7 +70,7 @@ test("الوسيط لا يغيّر ترتيب الكتل ولا محتوى ال�
   assert.equal(blocks[0].source.data, "صحيفة الدعوى");
   assert.equal(blocks[1].title, "المذكرة-الجوابية.docx");
   assert.equal(upstream.system, "نظام مِداد");
-  assert.equal(upstream.temperature, 0);
+  assert.equal(upstream.model, "claude-sonnet-5");
 });
 
 test("cache_control على كتلة نص النظام يمر أيضًا", async () => {
@@ -76,11 +78,30 @@ test("cache_control على كتلة نص النظام يمر أيضًا", async 
   assert.equal(upstream.system[0].cache_control.type, "ephemeral");
 });
 
-test("الوسيط ما زال يحذف stream وmetadata فقط", async () => {
+test("الوسيط يحذف stream وmetadata", async () => {
   const { upstream } = await post(withDocs({ stream: true, metadata: { user_id: "x" } }));
   assert.equal(upstream.stream, undefined);
   assert.equal(upstream.metadata, undefined);
   assert.equal(upstream.messages[0].content[1].cache_control.type, "ephemeral");
+});
+
+test("الوسيط يحذف temperature وtop_p وtop_k دفاعيًا", async () => {
+  // متصفح بقي على نسخة قديمة من app.js قد يرسلها، والنماذج الحديثة ترفض الطلب الذي يحملها.
+  const { upstream } = await post(withDocs({ temperature: 0, top_p: 0.9, top_k: 40 }));
+  assert.equal("temperature" in upstream, false);
+  assert.equal("top_p" in upstream, false);
+  assert.equal("top_k" in upstream, false);
+});
+
+test("حذف معاملات المعاينة لا يمس الملفات ولا نقطة التخزين المؤقت", async () => {
+  const { upstream } = await post(withDocs({ temperature: 1 }));
+  const blocks = upstream.messages[0].content;
+  assert.equal("temperature" in upstream, false);
+  assert.equal(blocks.length, 3);
+  assert.equal(blocks[0].source.data, "صحيفة الدعوى");
+  assert.equal(blocks[1].cache_control.type, "ephemeral");
+  assert.equal(upstream.model, "claude-sonnet-5");
+  assert.equal(upstream.system, "نظام مِداد");
 });
 
 test("الوسيط يقصّ max_tokens ولا يمس الكتل", async () => {

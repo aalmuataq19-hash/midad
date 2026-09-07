@@ -99,6 +99,7 @@ midad/
 ### server.js (الوسيط)
 - `GET /api` → `{ok, midad, configured}` (فحص).
 - `POST /api` → يتحقق من رأس `x-midad-pass` ضد `ACCESS_PASSWORD`، يحد الطلبات لكل IP، يقيّد `model` بالقائمة المسموحة و`max_tokens` بالحد الأعلى، ثم يمرّر الطلب إلى `https://api.anthropic.com/v1/messages` مع `x-api-key` من البيئة، ويعيد الاستجابة كما هي.
+- يحذف من الجسم قبل تمريره: `stream` و`metadata`، و`temperature` و`top_p` و`top_k` (دفاعيًا، لأن النماذج الحديثة ترفضها ولئلا يفشل متصفح بقي على نسخة قديمة من `app.js`).
 - أخطاؤه الخاصة بصيغة Anthropic: `midad_auth` (401)، `midad_config` (500)، `midad_rate` (429)، `midad_request` (400/413)، `midad_upstream` (502).
 - يقدّم فقط `index.html` و`app.js` (قائمة بيضاء). البقية 404.
 - `Cache-Control: no-cache` على الملفات العامة حتى لا يبقى المتصفح على نسخة قديمة.

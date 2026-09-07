@@ -76,6 +76,9 @@ async function handleApi(req, res, url) {
   // قيمة خارج المدى تُقصّ إلى السقف، وقيمة غير رقمية ترجع إلى الافتراضي.
   body.max_tokens = Math.min(Math.max(num(body.max_tokens, 4000, 1, 1e9), 256), MAX_TOKENS);
   delete body.stream; delete body.metadata;
+  // معاملات المعاينة ألغتها النماذج الحديثة (Sonnet 5 وOpus 5 وFable 5.1) وترفض الطلب الذي يحملها.
+  // تُحذف هنا دفاعيًا حتى لا يفشل متصفح بقي على نسخة قديمة من app.js في ذاكرته.
+  delete body.temperature; delete body.top_p; delete body.top_k;
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 280000);
