@@ -176,6 +176,40 @@ function readAnalysis(raw) {
     : [];
   return a;
 }
+const NEW_CASE = { number: "", court: "", circuit: "", type: "تجارية", plaintiff: "", defendant: "", subject: "", systems: [] };
+/* بناء قضية من نص ملف تحليل. نصوص المستندات المرافقة تُحفظ ملفاتٍ للقضية،
+   فتعمل الأسئلة وعارض المستندات، ولا يبقى النص مخزَّنًا مرتين. */
+async function importedCase(raw, base = NEW_CASE) {
+  const a = readAnalysis(raw);
+  const docs = a.docs || [];
+  delete a.docs;
+  const meta = a.meta || {};
+  const pOf = (r) => (a.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
+  const id = uid();
+  const recs = docs.map((d) => ({ id: uid(), name: d.name, kind: "text", mime: "text/plain", data: d.text, size: d.text.length }));
+  const unsaved = [];
+  for (const fl of recs) { if (!(await sset(`midad:file:${id}:${fl.id}`, fl))) unsaved.push(fl.name); }
+  if (unsaved.length) {
+    for (const fl of recs) await sdel(`midad:file:${id}:${fl.id}`);
+    throw new Error(`تعذر حفظ نصوص المستندات (${unsaved.join("، ")}) في ذاكرة المتصفح. احذف قضية قديمة ثم أعد الاستيراد.`);
+  }
+  return {
+    ...NEW_CASE, ...base, id,
+    number: base.number || meta.number || "", court: base.court || meta.court || "", circuit: base.circuit || meta.circuit || "", subject: base.subject || meta.subject || "",
+    plaintiff: base.plaintiff || pOf("مدعي") || "", defendant: base.defendant || pOf("مدعى عليه") || "",
+    sendRaw: false, files: recs.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size })), createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
+    notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null, systems: [],
+    docCount: recs.length,
+  };
+}
+/* الملف قد يصل الجوال من تطبيق محادثة بامتداد أو نوعٍ غير متوقَّع، فيُخفيه منتقي
+   الملفات إن قُيّد بـ accept. نقبل أي ملف ونردّ برسالة واضحة إن لم يكن تحليلًا. */
+async function readImport(file) {
+  if (!file) throw new Error("لم يُختر ملف.");
+  if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
+  if (!file.size) throw new Error(`الملف «${file.name}» فارغ.`);
+  return await file.text();
+}
 function fileBlocks(files, sendRaw = false, cache = true) {
   const out = [];
   for (const f of files) {
@@ -464,7 +498,8 @@ function App() {
       ) : view === "settings" ? (
         <SettingsScreen onClose={() => setView("home")} />
       ) : view === "home" ? (
-        <Home cases={cases} onNew={() => setView("new")} onOpen={(id) => { setActiveId(id); setView("case"); }} onSettings={() => setView("settings")} />
+        <Home cases={cases} onNew={() => setView("new")} onOpen={(id) => { setActiveId(id); setView("case"); }} onSettings={() => setView("settings")} setToast={setToast}
+          onImport={(c) => { setCases((cs) => [c, ...cs]); setActiveId(c.id); setView("case"); }} />
       ) : view === "new" ? (
         <NewCase library={library} onCancel={() => setView("home")} onCreated={(c) => { setCases((cs) => [c, ...cs]); setActiveId(c.id); setView("case"); }} updateCase={updateCase} setToast={setToast} />
       ) : active ? (
@@ -484,9 +519,22 @@ function completion(c) {
   p += Math.min(50, (c.visited?.length || 0) * 5);
   return Math.min(100, p);
 }
-function Home({ cases, onNew, onOpen, onSettings }) {
+function Home({ cases, onNew, onOpen, onSettings, onImport, setToast }) {
   const [q, setQ] = useState("");
+  const [err, setErr] = useState("");
+  const [paste, setPaste] = useState(null);
+  const impRef = useRef();
   const list = cases.filter((c) => !q || [c.number, c.type, c.plaintiff, c.defendant, c.subject].join(" ").includes(q));
+  const doImport = async (raw) => {
+    setErr("");
+    try {
+      const c = await importedCase(raw);
+      onImport(c);
+      setToast(c.docCount
+        ? `استُورد التحليل ومعه نص ${arNum(c.docCount)} من المستندات، فيعمل «اسأل ملف القضية» مباشرة.`
+        : "استُورد التحليل. نصوص المستندات ليست معه، فأضفها إن أردت السؤال عنها.");
+    } catch (e) { setErr((e && e.message) || "تعذر استيراد الملف."); }
+  };
   return (
     <div className="max-w-5xl mx-auto px-6 pt-20 pb-24 fade relative">
       <button onClick={onSettings} title="الإعدادات" className="absolute top-6 left-6 p-2 rounded-lg" style={{ color: C.mute, border: `1px solid ${C.line}` }}><Settings size={16} /></button>
@@ -494,7 +542,17 @@ function Home({ cases, onNew, onOpen, onSettings }) {
         <div className="font-bold" style={{ fontSize: 64, lineHeight: 1, letterSpacing: "-0.01em" }}>مِداد</div>
         <div className="text-lg mt-3 font-medium">مساحة العمل القضائية الذكية</div>
         <div className="text-sm mt-2" style={{ color: C.mute }}>من ملف القضية إلى صورة واضحة للمسائل محل النظر.</div>
-        <div className="mt-8"><Btn onClick={onNew}><Plus size={16} /> قضية جديدة</Btn></div>
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <Btn onClick={onNew}><Plus size={16} /> قضية جديدة</Btn>
+          <Btn kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={16} /> استيراد تحليل</Btn>
+          <input ref={impRef} type="file" className="hidden" onChange={async (e) => {
+            const fl = e.target.files && e.target.files[0]; e.target.value = "";
+            if (!fl) return;
+            try { await doImport(await readImport(fl)); } catch (x) { setErr((x && x.message) || "تعذر قراءة الملف."); }
+          }} />
+        </div>
+        {err && <div className="text-sm rounded-lg p-3 mt-4 max-w-md mx-auto text-right" style={{ background: C.copperSoft, color: C.copper }}>{err}</div>}
+        <div className="mt-4 max-w-md mx-auto text-right"><PasteImport value={paste} setValue={setPaste} onImport={doImport} /></div>
       </div>
       <div className="relative max-w-md mx-auto mb-10">
         <Search size={16} className="absolute top-3 right-3" style={{ color: C.mute }} />
@@ -619,35 +677,22 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
     for (const file of Array.from(list)) { try { const r = await readFile(file); setFiles((fs) => [...fs, r]); } catch (e) { setErr(e.message); } }
   };
   const impRef = useRef();
+  const [paste, setPaste] = useState(null);
+  const doImport = async (raw) => {
+    setErr("");
+    try {
+      const c = await importedCase(raw, f);
+      onCreated(c);
+      setToast(c.docCount
+        ? `استُورد التحليل ومعه نص ${arNum(c.docCount)} من المستندات، فيعمل «اسأل ملف القضية» مباشرة.`
+        : "استُورد التحليل. نصوص المستندات ليست معه، فأضفها إن أردت السؤال عنها.");
+    } catch (e) { setErr((e && e.message) || "تعذر استيراد الملف."); }
+  };
   const importAnalysis = async (file) => {
     if (!file) return;
     setErr("");
-    try {
-      if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
-      const a = readAnalysis(await file.text());
-      const docs = a.docs || [];
-      delete a.docs;
-      const meta = a.meta || {};
-      const pOf = (r) => (a.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
-      const id = uid();
-      const recs = docs.map((d) => ({ id: uid(), name: d.name, kind: "text", mime: "text/plain", data: d.text, size: d.text.length }));
-      const unsaved = [];
-      for (const fl of recs) { if (!(await sset(`midad:file:${id}:${fl.id}`, fl))) unsaved.push(fl.name); }
-      if (unsaved.length) {
-        for (const fl of recs) await sdel(`midad:file:${id}:${fl.id}`);
-        throw new Error(`تعذر حفظ نصوص المستندات (${unsaved.join("، ")}) في ذاكرة المتصفح. احذف قضية قديمة ثم أعد الاستيراد.`);
-      }
-      onCreated({
-        id, ...f,
-        number: f.number || meta.number || "", court: f.court || meta.court || "", circuit: f.circuit || meta.circuit || "", subject: f.subject || meta.subject || "",
-        plaintiff: f.plaintiff || pOf("مدعي") || "", defendant: f.defendant || pOf("مدعى عليه") || "",
-        sendRaw: false, files: recs.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size })), createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
-        notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null, systems: [],
-      });
-      setToast(recs.length
-        ? `استُورد التحليل ومعه نص ${arNum(recs.length)} من المستندات، فيعمل «اسأل ملف القضية» مباشرة.`
-        : "استُورد التحليل. نصوص المستندات ليست معه، فأضفها إن أردت السؤال عنها.");
-    } catch (e) { setErr((e && e.message) || "تعذر استيراد الملف."); }
+    try { await doImport(await readImport(file)); }
+    catch (e) { setErr((e && e.message) || "تعذر قراءة الملف."); }
   };
   const start = async () => {
     if (!files.length) { setErr("ارفع ملفًا واحدًا على الأقل قبل بدء التحليل."); return; }
@@ -748,9 +793,33 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
           <Btn onClick={start}><Sparkles size={16} /> ابدأ التحليل</Btn>
           <Btn kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={16} /> استيراد تحليل</Btn>
           <Btn kind="ghost" onClick={onCancel}>إلغاء</Btn>
-          <input ref={impRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+          <input ref={impRef} type="file" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
         </div>
         <div className="text-xs leading-6" style={{ color: C.mute }}>«استيراد تحليل» يفتح ملف analysis.json المُنتَج بأمر التحليل في Claude Code، ويعرضه في الأقسام العشرة بلا أي اتصال بالنموذج ولا استهلاك رصيد.</div>
+        <PasteImport value={paste} setValue={setPaste} onImport={doImport} />
+      </div>
+    </div>
+  );
+}
+
+/* منتقي الملفات في الجوال قد يرفض ملف التحليل إن وصل من تطبيق محادثة،
+   فهذا طريق ثانٍ لا يحتاج ملفًا: يُفتح النص ويُلصق هنا. */
+function PasteImport({ value, setValue, onImport }) {
+  if (value === null) return (
+    <button onClick={() => setValue("")} className="text-xs underline decoration-dotted" style={{ color: C.acc }}>
+      لم يظهر الملف في جوالك؟ الصق نص التحليل بدلًا منه
+    </button>
+  );
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+      <div className="text-sm font-semibold">الصق نص التحليل</div>
+      <div className="text-xs leading-6" style={{ color: C.mute }}>افتح ملف analysis.json، انسخ محتواه كاملًا، والصقه هنا. يبدأ بقوس {"{"} وينتهي بقوس {"}"}.</div>
+      <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={5} dir="ltr"
+        placeholder='{"summary": …}'
+        className="w-full rounded-lg p-3 text-xs outline-none" style={{ background: C.bg, border: `1px solid ${C.line}`, fontFamily: "monospace" }} />
+      <div className="flex flex-wrap gap-3">
+        <Btn small onClick={() => value.trim() && onImport(value)}><Upload size={14} /> استورد النص</Btn>
+        <Btn small kind="ghost" onClick={() => setValue(null)}>إخفاء</Btn>
       </div>
     </div>
   );
@@ -773,13 +842,23 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
   const importAnalysis = async (file) => {
     if (!file) return;
     try {
-      if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
-      const parsed = readAnalysis(await file.text());
+      const parsed = readAnalysis(await readImport(file));
+      const docs = parsed.docs || [];
+      delete parsed.docs;
+      // نصوص المستندات المرافقة تُضاف ملفاتٍ لهذه القضية، ولا تُترك داخل التحليل
+      const recs = [];
+      for (const d of docs) {
+        const fl = { id: uid(), name: d.name, kind: "text", mime: "text/plain", data: d.text, size: d.text.length };
+        if (await sset(`midad:file:${c.id}:${fl.id}`, fl)) recs.push(fl);
+      }
       const pOf = (r) => (parsed.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
       update((x) => ({ ...x, analysis: parsed, prevAnalysis: x.analysis || null,
+        files: [...(x.files || []), ...recs.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size }))],
         number: x.number || (parsed.meta || {}).number || "", court: x.court || (parsed.meta || {}).court || "", circuit: x.circuit || (parsed.meta || {}).circuit || "",
         plaintiff: x.plaintiff || pOf("مدعي") || "", defendant: x.defendant || pOf("مدعى عليه") || "" }));
-      setToast("استُبدل تحليل هذه القضية بالتحليل المستورد.");
+      setToast(recs.length
+        ? `استُبدل التحليل، وأُضيف نص ${arNum(recs.length)} من المستندات إلى القضية.`
+        : "استُبدل تحليل هذه القضية بالتحليل المستورد.");
     } catch (e) { setToast((e && e.message) || "تعذر استيراد الملف."); }
   };
 
@@ -863,7 +942,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
         </div>
       </aside>
       <input ref={addInp} type="file" multiple accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.gif" className="hidden" onChange={(e) => { addMore(e.target.files); e.target.value = ""; }} />
-      <input ref={impInp} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+      <input ref={impInp} type="file" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
 
       {/* المحتوى */}
       <main className="flex-1 min-w-0 pb-40">
@@ -1397,7 +1476,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
         <Btn small kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={14} /> استورد من ملف</Btn>
         <Btn small kind="ghost" onClick={exportLib} disabled={!(library.statutes || []).length && !(library.principles || []).length}><Download size={14} /> صدّر مكتبتي</Btn>
         <Btn small onClick={() => { setForm({}); setAdd(true); }}><Plus size={14} /> أضف مادة</Btn>
-        <input ref={impRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importLib(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+        <input ref={impRef} type="file" className="hidden" onChange={(e) => { importLib(e.target.files && e.target.files[0]); e.target.value = ""; }} />
       </div>
 
       {groups.length === 0 ? (
