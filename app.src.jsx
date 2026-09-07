@@ -47,16 +47,9 @@ const SECTIONS = [
   ["issues", "المسائل محل النظر", Sparkles], ["laws", "النصوص النظامية", BookOpen],
   ["notes", "ملاحظاتي", StickyNote], ["memo", "مذكرة الدراسة", ScrollText],
 ];
-const CASE_TYPES = {
-  "تجارية": "العقد، الالتزام، التنفيذ، الإخلال، الضرر، المطالبات المالية.",
-  "مدنية": "العقد والالتزام، المسؤولية التقصيرية والفعل الضار، الضرر والتعويض، الملكية والحقوق العينية، الحيازة والشفعة، مضي المدة.",
-  "جزائية": "الوصف الجرمي، الأركان، إجراءات القبض والتفتيش، أقوال المتهم، التقارير الفنية، أدلة الإثبات.",
-  "عمالية": "علاقة العمل، الأجر، إنهاء العقد، المستحقات، الإخطار.",
-  "أحوال شخصية": "الصفة، الرابطة، النفقة، الحضانة، الإثبات بالشهادة.",
-  "تنفيذ": "السند التنفيذي، الإعلان، الامتناع، الاعتراض على التنفيذ.",
-};
+const { CASE_TYPES, NOT_FOUND, SYS, STAGES, lastPart, stagePrompt } = require("./src/prompts.js");
 const ORD = ["الأولى", "الثانية", "الثالثة", "الرابعة", "الخامسة", "السادسة", "السابعة", "الثامنة"];
-const NOT_FOUND = "لم أعثر في ملفات القضية المرفوعة على ما يثبت ذلك.";
+
 const uid = () => Math.random().toString(36).slice(2, 9);
 const arNum = (n) => Number(n ?? 0).toLocaleString("ar-EG");
 
@@ -101,16 +94,6 @@ function dual(iso, fallback) {
 }
 
 /* ───────────────────────── الاتصال بالنموذج ───────────────────────── */
-const SYS = `أنت مساعد تحليلي لقاضٍ. مهمتك تنظيم ملف قضية وإعادة ترتيبه أمامه، لا الحكم فيها ولا الترجيح.
-قواعد ملزمة لا تخرج عنها:
-1. لا تذكر أي معلومة غير موجودة نصًا في المستندات المرفقة. لا تخترع، ولا تكمل من معرفتك العامة، ولا تفترض.
-2. كل عنصر تستخرجه يحمل مصدره في حقل src: اسم المستند كما هو في عنوانه (doc)، رقم الصفحة (page، وإن تعذر فاكتب 0)، ومقتبس حرفي قصير من موضع المعلومة لا يتجاوز 25 كلمة (quote).
-3. لا تكتب أي نتيجة قضائية، ولا ترجيحًا، ولا توصية بالحكم، ولا تقييمًا لقوة دليل.
-4. لا تستخدم "ثابت" أو "يثبت" أو "متفق عليه" أو "ثبت". استخدم: "ورد في المستند"، "ادعى الطرف"، "نازع الطرف"، "لم يظهر في الملف نزاع صريح".
-5. أجب بـ JSON فقط، بلا أي نص قبله أو بعده، وبلا علامات markdown.
-6. إذا لم تجد عناصر لحقل، اجعله مصفوفة فارغة. لا تملأه بالتخمين.
-7. اكتب بعربية فصحى بسيطة ومباشرة.
-8. إذا وجدت في نص المستند علامات مثل [صفحة 3] فهي أرقام الصفحات الفعلية؛ استخدمها في حقل page.`;
 
 const FALLBACKS = ["claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -166,6 +149,27 @@ async function testConnection() {
 const { repairJSON, pj, createPjOrFix } = require("./src/json-repair.js");
 const FIX_SYS = "أنت مصلح JSON. تستلم نصًا يُفترض أنه JSON لكنه غير صالح، فتعيده JSON صالحًا تمامًا بنفس المحتوى والمفاتيح، بلا أي نص قبله أو بعده وبلا markdown. إن كان مقطوعًا فأغلقه بأقل تعديل ممكن دون اختراع بيانات.";
 const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000));
+/* استيراد تحليل أُنتج خارج الموقع (أمر /midad-analyze في Claude Code).
+   يُتحقق من البنية قبل قبوله، ويوسَم بـ imported ليعرف التطبيق أن لا ملفات وراءه. */
+const A_ARRAYS = ["parties", "issues", "facts", "pl", "df", "defenses", "evidence", "conflicts", "gaps"];
+function readAnalysis(raw) {
+  let j;
+  try { j = JSON.parse(String(raw).replace(/^\ufeff/, "")); } catch { throw new Error("الملف ليس JSON صالحًا. اختر ملف analysis.json الذي أنتجه أمر التحليل."); }
+  if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("محتوى الملف ليس تحليل قضية.");
+  const has = A_ARRAYS.filter((k) => Array.isArray(j[k])).length;
+  if (!j.summary && has < 3) throw new Error("لا يبدو أن الملف تحليل مِداد: ينقصه summary وأغلب الأقسام.");
+  const a = { errors: j.errors && typeof j.errors === "object" ? j.errors : {} };
+  a.summary = j.summary && typeof j.summary === "object" ? j.summary : {};
+  a.meta = j.meta && typeof j.meta === "object" ? j.meta : {};
+  for (const k of A_ARRAYS) a[k] = Array.isArray(j[k]) ? j[k] : [];
+  a.issues = a.issues.filter((x) => x && x.title).map((x) => ({ ...x, laws: Array.isArray(x.laws) ? x.laws : [] }));
+  if (j.lawPick) a.lawPick = j.lawPick;
+  a.done = true;
+  a.at = typeof j.at === "number" ? j.at : Date.now();
+  a.imported = true;
+  a.source = j.source || "ملف مستورد";
+  return a;
+}
 function fileBlocks(files, sendRaw = false, cache = true) {
   const out = [];
   for (const f of files) {
@@ -209,50 +213,6 @@ ${index}
 }
 const EXTRA_LABELS = { lawpick: "اختيار النصوص النظامية المرتبطة" };
 const stageLabel = (k) => ((STAGES.find((x) => x[0] === k) || [])[1]) || EXTRA_LABELS[k] || k;
-const STAGES = [
-  ["overview", "قراءة الملفات وصورة القضية"], ["facts", "استخراج الوقائع"],
-  ["reqdef", "الطلبات والدفوع"], ["evidence", "الأدلة والمستندات"],
-  ["issues", "ربط المسائل بمصادرها"], ["review", "التعارضات وما يحتاج إلى تحقق"],
-];
-// آخر جزء من المسار البنيوي هو عنوان الفرع/الفصل، وفيه موضوع المادة. يُرسل وحده لا المسار كله.
-const lastPart = (p) => String(p || "").split(">").pop().trim();
-function stagePrompt(key, ctx) {
-  const S = 'src:{"doc":"اسم المستند","page":0,"quote":"مقتبس حرفي قصير"}';
-  const body = stageBody(key, ctx);
-  return ctx.caseType && CASE_TYPES[ctx.caseType] ? `${body}
-
-سجّل القاضي نوع الدعوى: ${ctx.caseType}. فوجّه عنايتك عند القراءة إلى: ${CASE_TYPES[ctx.caseType]}
-وهذا توجيه لما تبحث عنه في الملف لا أكثر: لا تصنّف الدعوى بنفسك، ولا تضف عنصرًا لم يرد في المستندات نصًا لمجرد أنه معتاد في هذا النوع، ولا يغيّر هذا شيئًا من القواعد الملزمة أعلاه.` : body;
-}
-function stageBody(key, ctx) {
-  const S = 'src:{"doc":"اسم المستند","page":0,"quote":"مقتبس حرفي قصير"}';
-  switch (key) {
-    case "overview": return `استخرج من المستندات المرفقة صورة القضية وأطرافها والمسائل المطروحة. لا تتجاوز 6 مسائل، وصِغ كل مسألة على شكل سؤال يبدأ بـ "هل" أو "ما".
-أعد JSON بهذا الشكل بالضبط:
-{"summary":{"claim":"ما الدعوى في سطرين","asks":"ماذا يطلب المدعي","reply":"ماذا يجيب المدعى عليه","core":"جوهر النزاع في سطر"},"parties":[{"name":"","role":"مدعي|مدعى عليه|طرف آخر","agent":"اسم الوكيل إن ورد وإلا فارغ"}],"issues":[{"title":"سؤال المسألة"}],"meta":{"court":"","circuit":"","number":"","subject":""}}`;
-    case "facts": return `استخرج الوقائع الجوهرية مرتبة زمنيًا، لا تتجاوز 12 واقعة. لكل واقعة: التاريخ كما ورد نصًا في date_text (هجريًا أو ميلاديًا كما هو)، وفي date اكتب التاريخ الميلادي بصيغة YYYY-MM-DD فقط إن كنت متأكدًا من التحويل، وإلا اجعله فارغًا. kind: "document" إن وردت في مستند بذاته (عقد، محضر، خطاب)، "claimed" إن ادعاها طرف في مذكرته، "disputed" إن نازع فيها الطرف الآخر. conf: "high" إن كان النص صريحًا، و"low" إن كان مستخلصًا من أكثر من موضع أو النص ضعيف القراءة.
-أعد JSON بهذا الشكل بالضبط:
-{"facts":[{"date":"","date_text":"","text":"الواقعة في جملة واحدة","kind":"document|claimed|disputed","conf":"high|low",${S}}]}`;
-    case "reqdef": return `استخرج طلبات المدعي (pl) وطلبات المدعى عليه (df) والدفوع (defenses)، لا تتجاوز 5 في كل قائمة. لكل طلب: نصه، وسنده كما ورد في مذكرة صاحبه، وأسماء المستندات التي أحال إليها، وconf كما سبق. في طلبات المدعي أضف replied: "yes" إن ظهر رد من المدعى عليه عليه، "no" إن لم يظهر رد صريح، "unclear" إن كان غير واضح. الدفع مستقل عن الطلب: هو اعتراض إجرائي أو موضوعي (عدم قبول، تقادم، عدم اختصاص، إنكار، سبق فصل...).
-أعد JSON بهذا الشكل بالضبط:
-{"pl":[{"text":"","basis":"","docs":[""],"replied":"yes|no|unclear","conf":"high|low",${S}}],"df":[{"text":"","basis":"","docs":[""],"conf":"high|low",${S}}],"defenses":[{"text":"","by":"المدعي|المدعى عليه","basis":"الأساس كما ورد في المذكرة","conf":"high|low",${S}}]}`;
-    case "evidence": return `أنشئ جدول المستندات: كل مستند ورد في الملف أو أُحيل إليه. by: من قدّمه. purpose: ما الذي يراد إثباته به بحسب مقدّمه، وابدأها دائمًا بعبارة "يراد به بحسب المذكرة". issue: المسألة التي يتعلق بها من هذه القائمة إن أمكن: ${ctx.issues.join(" | ")}. لا تتجاوز 10 صفوف.
-أعد JSON بهذا الشكل بالضبط:
-{"evidence":[{"doc":"","by":"","purpose":"يراد به بحسب المذكرة ...","issue":""}]}`;
-    case "issues": return `لكل مسألة من المسائل التالية، اجمع ما تفرق في الملف عنها:
-${ctx.issues.map((t, i) => `${i + 1}. ${t}`).join("\n")}
-لكل مسألة: pl ما يستند إليه المدعي (سطران)، df ما يستند إليه المدعى عليه (سطران)، evidence أسماء المستندات المرتبطة، questions ثلاثة أسئلة يمكن أن يوجهها القاضي للأطراف لتوضيح ما لم يتضح في الملف عن هذه المسألة.
-laws: النصوص النظامية المرتبطة، ولا تستخدم إلا النصوص التالية التي أضافها القاضي حصرًا، وإن لم تكن هناك نصوص أو لم يرتبط شيء منها بالمسألة فاجعل المصفوفة فارغة. لا تستشهد بأي مادة من خارج هذه القائمة مهما كانت معرفتك بها:
-${ctx.statutes.length ? ctx.statutes.map((s) => `- ${s.ref} — ${s.system}${lastPart(s.path) ? ` [${lastPart(s.path)}]` : ""}: ${s.text}`).join("\n") : "(لا توجد نصوص مضافة)"}
-أعد JSON بهذا الشكل بالضبط، وبنفس ترتيب المسائل وعددها:
-{"issues":[{"title":"","pl":"","df":"","evidence":[""],"laws":[{"ref":"المادة (x) — نظام y","why":"سطر يبين وجه الارتباط دون ترجيح"}],"questions":["","",""]}]}`;
-    case "review": return `ابحث في الملف عن تعارضات محتملة: اختلاف تواريخ لنفس الحدث، اختلاف مبالغ لنفس المطالبة، تناقض أقوال الطرف الواحد بين موضعين، مستندات تشير إلى وقائع مختلفة، طلب ورد في موضع ولم يرد في موضع آخر. لا تتجاوز 6. اعرض الطرفين a و b بمصدر كل منهما. انتبه: التاريخ الهجري والميلادي لنفس اليوم ليسا تعارضًا، والرقم بالأرقام العربية والهندية ليس تعارضًا.
-ثم gaps: ما يحتاج إلى تحقق: ما لم يتضح من الملف، مرفقات أُحيل إليها ولم توجد بين المستندات المرفقة، مستندات ذُكرت بالاسم ولم توجد، دفوع لم يظهر عليها رد، صفحات ضعيفة القراءة، صفة موقّع غير واضحة. لا تتجاوز 8.
-أعد JSON بهذا الشكل بالضبط:
-{"conflicts":[{"type":"مبلغ|تاريخ|أقوال|مستندات|طلب","a":{"text":"","src":{"doc":"","page":0,"quote":""}},"b":{"text":"","src":{"doc":"","page":0,"quote":""}}}],"gaps":[{"text":""}]}`;
-    default: return "";
-  }
-}
 
 /* ───────────────────────── قراءة الملفات ───────────────────────── */
 const toB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = () => rej(new Error("تعذرت قراءة الملف")); r.readAsDataURL(file); });
@@ -650,6 +610,24 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
     setErr("");
     for (const file of Array.from(list)) { try { const r = await readFile(file); setFiles((fs) => [...fs, r]); } catch (e) { setErr(e.message); } }
   };
+  const impRef = useRef();
+  const importAnalysis = async (file) => {
+    if (!file) return;
+    setErr("");
+    try {
+      if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
+      const a = readAnalysis(await file.text());
+      const meta = a.meta || {};
+      const id = uid();
+      onCreated({
+        id, ...f,
+        number: f.number || meta.number || "", court: f.court || meta.court || "", circuit: f.circuit || meta.circuit || "", subject: f.subject || meta.subject || "",
+        sendRaw: false, files: [], createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
+        notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null, systems: [],
+      });
+      setToast("استُورد التحليل. الملفات الأصلية ليست معه، فأضفها إن أردت السؤال عنها.");
+    } catch (e) { setErr((e && e.message) || "تعذر استيراد الملف."); }
+  };
   const start = async () => {
     if (!files.length) { setErr("ارفع ملفًا واحدًا على الأقل قبل بدء التحليل."); return; }
     setErr(""); setBusy(true);
@@ -745,10 +723,13 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
           {conn && !conn.busy && <span style={{ color: conn.ok ? C.acc : C.copper }}>{conn.msg}</span>}
         </div>
         <div className="text-xs rounded-lg p-3 leading-6" style={{ background: C.amberSoft, color: C.amber }}>تُرسل الملفات مباشرة من متصفحك إلى Anthropic API بمفتاحك، وتُخزن القضايا داخل هذا المتصفح فقط. لا ترفع ملف قضية حقيقية. استخدم بيانات وهمية فقط.</div>
-        <div className="pt-2 flex gap-3">
+        <div className="pt-2 flex flex-wrap gap-3">
           <Btn onClick={start}><Sparkles size={16} /> ابدأ التحليل</Btn>
+          <Btn kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={16} /> استيراد تحليل</Btn>
           <Btn kind="ghost" onClick={onCancel}>إلغاء</Btn>
+          <input ref={impRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
         </div>
+        <div className="text-xs leading-6" style={{ color: C.mute }}>«استيراد تحليل» يفتح ملف analysis.json المُنتَج بأمر التحليل في Claude Code، ويعرضه في الأقسام العشرة بلا أي اتصال بالنموذج ولا استهلاك رصيد.</div>
       </div>
     </div>
   );
@@ -767,6 +748,16 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
   const [confirmDel, setConfirmDel] = useState(false);
   const a = c.analysis || {};
   const addInp = useRef();
+  const impInp = useRef();
+  const importAnalysis = async (file) => {
+    if (!file) return;
+    try {
+      if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
+      const parsed = readAnalysis(await file.text());
+      update((x) => ({ ...x, analysis: parsed, prevAnalysis: x.analysis || null }));
+      setToast("استُبدل تحليل هذه القضية بالتحليل المستورد.");
+    } catch (e) { setToast((e && e.message) || "تعذر استيراد الملف."); }
+  };
 
   useEffect(() => { if (!c.visited?.includes(sec)) update((x) => ({ ...x, visited: [...(x.visited || []), sec] })); }, [sec]);
 
@@ -833,10 +824,12 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
         <div className="p-3 space-y-1" style={{ borderTop: `1px solid ${C.line}` }}>
           <button onClick={() => addInp.current.click()} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-right" style={{ color: C.ink }}><Upload size={15} /> أضف ملفات إلى القضية</button>
           <button onClick={() => reanalyze([])} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-right" style={{ color: C.ink }}><RefreshCw size={15} /> أعد التحليل</button>
+          <button onClick={() => impInp.current && impInp.current.click()} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-right" style={{ color: C.ink }}><Download size={15} /> استيراد تحليل</button>
           <button onClick={() => setConfirmDel(true)} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-right" style={{ color: C.copper }}><Trash2 size={15} /> احذف القضية نهائيًا</button>
         </div>
       </aside>
       <input ref={addInp} type="file" multiple accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.gif" className="hidden" onChange={(e) => { addMore(e.target.files); e.target.value = ""; }} />
+      <input ref={impInp} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importAnalysis(e.target.files && e.target.files[0]); e.target.value = ""; }} />
 
       {/* المحتوى */}
       <main className="flex-1 min-w-0 pb-40">
@@ -846,7 +839,8 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
           <Btn kind="ghost" small onClick={() => setPanel("gaps")}><Eye size={14} /> ما الذي يحتاج إلى تحقق؟ {nGaps ? <span className="text-xs" style={{ color: C.amber }}>{arNum(nGaps)}</span> : null}</Btn>
           <Btn kind="ghost" small onClick={() => setPanel("new")}><History size={14} /> ما الجديد؟</Btn>
           <div className="md:hidden flex gap-1 mr-auto">
-            <button onClick={() => addInp.current.click()} className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Upload size={15} /></button>
+            <button onClick={() => addInp.current.click()} title="أضف ملفات" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Upload size={15} /></button>
+            <button onClick={() => impInp.current && impInp.current.click()} title="استيراد تحليل" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Download size={15} /></button>
             <button onClick={() => setConfirmDel(true)} className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}`, color: C.copper }}><Trash2 size={15} /></button>
           </div>
         </div>
@@ -859,6 +853,12 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
             <Empty>لم يُحلَّل الملف بعد. <button className="underline" onClick={() => reanalyze([])}>ابدأ التحليل</button></Empty>
           ) : (
             <>
+              {a.imported && (
+                <div className="rounded-lg p-4 mb-6 text-sm leading-7" style={{ background: C.accSoft, color: C.acc }}>
+                  هذه دراسة <b>مستوردة</b> من ملف تحليل، لا من تحليل جرى داخل الموقع. تُعرض كاملة في الأقسام العشرة، وتقدر تكتب ملاحظاتك وتنشئ مذكرة الدراسة منها.
+                  {!(c.files || []).length && <span className="block mt-1">ملفات القضية الأصلية ليست معها، فلا يعمل «اسأل ملف القضية» ولا عارض المستندات حتى ترفع الملفات من «أضف ملفات إلى القضية».</span>}
+                </div>
+              )}
               {a.errors && Object.keys(a.errors).length > 0 && (
                 <div className="rounded-lg p-4 mb-6 text-sm" style={{ background: C.amberSoft, color: C.amber }}>
                   <div className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" /><div className="leading-7">تعذر إكمال: {Object.keys(a.errors).map((k) => stageLabel(k)).join("، ")}.</div></div>
@@ -1697,7 +1697,15 @@ function AskBar({ c, loadFiles, update, openSrc }) {
   const [busy, setBusy] = useState(false);
   const chat = c.chat || [];
   const presets = ["أين ذكر المدعى عليه أنه قام بالسداد؟", "ما المستندات المتعلقة بالتسليم؟", "هل يوجد اختلاف بين مبلغ المطالبة في صحيفة الدعوى والمذكرة؟", "لخص أقوال المدعى عليه المتعلقة بمسألة التسليم فقط."];
+  const hasFiles = (c.files || []).length > 0;
+  const ready = isReady();
+  const blocked = !hasFiles ? "لا توجد ملفات مرفوعة في هذه القضية. الدراسة معروضة من ملف تحليل مستورد، والسؤال يحتاج ملفات القضية نفسها: ارفعها من «أضف ملفات إلى القضية»."
+    : !ready ? (API.available
+        ? "السؤال يحتاج اتصالًا بالنموذج. أدخل كلمة مرور الموقع من الإعدادات (رمز الترس في الصفحة الرئيسية)."
+        : "السؤال يحتاج اتصالًا بالنموذج. أدخل مفتاح API من الإعدادات (رمز الترس في الصفحة الرئيسية).")
+    : "";
   const send = async (text) => {
+    if (blocked) { setOpen(true); return; }
     const question = (text || q).trim(); if (!question || busy) return;
     setQ(""); setBusy(true); setOpen(true);
     update((x) => ({ ...x, chat: [...(x.chat || []), { role: "q", text: question, literal }] }));
@@ -1727,7 +1735,8 @@ function AskBar({ c, loadFiles, update, openSrc }) {
               <button onClick={() => setOpen(false)} style={{ color: C.mute }}><X size={16} /></button>
             </div>
           </div>
-          {chat.length === 0 && <div className="flex flex-wrap gap-2 mb-4">{presets.map((p) => <button key={p} onClick={() => send(p)} className="text-xs px-3 py-1.5 rounded-full text-right" style={{ background: C.card, border: `1px solid ${C.line}` }}>{p}</button>)}</div>}
+          {blocked && <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: C.amberSoft, color: C.amber }}>{blocked}</div>}
+          {!blocked && chat.length === 0 && <div className="flex flex-wrap gap-2 mb-4">{presets.map((p) => <button key={p} onClick={() => send(p)} className="text-xs px-3 py-1.5 rounded-full text-right" style={{ background: C.card, border: `1px solid ${C.line}` }}>{p}</button>)}</div>}
           {chat.map((m, i) => m.role === "q" ? (
             <div key={i} className="flex justify-start mb-3"><div className="rounded-xl px-4 py-2 text-sm max-w-xl" style={{ background: C.accSoft, color: C.acc }}>{m.text}{m.literal && <span className="text-xs mr-2 opacity-70">(حرفي)</span>}</div></div>
           ) : (
@@ -1751,7 +1760,7 @@ function AskBar({ c, loadFiles, update, openSrc }) {
       <div className="max-w-4xl mx-auto px-4 py-3 flex items-center gap-2">
         <div className="flex-1 flex items-center gap-2 rounded-xl px-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
           <MessageSquare size={16} style={{ color: C.mute }} />
-          <input value={q} onFocus={() => setOpen(true)} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="اسأل عن هذه القضية…" className="flex-1 bg-transparent outline-none py-2.5 text-sm" />
+          <input value={q} onFocus={() => setOpen(true)} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={blocked ? "السؤال غير متاح — اضغط لمعرفة السبب" : "اسأل عن هذه القضية…"} className="flex-1 bg-transparent outline-none py-2.5 text-sm" />
           <button onClick={() => setLiteral(!literal)} className="text-xs px-2 py-1 rounded-md whitespace-nowrap" style={{ background: literal ? C.acc : C.grey, color: literal ? "#fff" : C.mute }} title="اعرض المقاطع الأصلية فقط دون تلخيص">الحرفي فقط</button>
         </div>
         <button onClick={() => send()} disabled={busy} className="p-2.5 rounded-xl disabled:opacity-50" style={{ background: C.acc, color: "#fff" }}><Send size={16} style={{ transform: "rotate(180deg)" }} /></button>
