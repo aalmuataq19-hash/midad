@@ -49,6 +49,7 @@ const SECTIONS = [
 ];
 const CASE_TYPES = {
   "تجارية": "العقد، الالتزام، التنفيذ، الإخلال، الضرر، المطالبات المالية.",
+  "مدنية": "العقد والالتزام، المسؤولية التقصيرية والفعل الضار، الضرر والتعويض، الملكية والحقوق العينية، الحيازة والشفعة، مضي المدة.",
   "جزائية": "الوصف الجرمي، الأركان، إجراءات القبض والتفتيش، أقوال المتهم، التقارير الفنية، أدلة الإثبات.",
   "عمالية": "علاقة العمل، الأجر، إنهاء العقد، المستحقات، الإخطار.",
   "أحوال شخصية": "الصفة، الرابطة، النفقة، الحضانة، الإثبات بالشهادة.",
@@ -190,6 +191,14 @@ const STAGES = [
   ["issues", "ربط المسائل بمصادرها"], ["review", "التعارضات وما يحتاج إلى تحقق"],
 ];
 function stagePrompt(key, ctx) {
+  const S = 'src:{"doc":"اسم المستند","page":0,"quote":"مقتبس حرفي قصير"}';
+  const body = stageBody(key, ctx);
+  return ctx.caseType && CASE_TYPES[ctx.caseType] ? `${body}
+
+سجّل القاضي نوع الدعوى: ${ctx.caseType}. فوجّه عنايتك عند القراءة إلى: ${CASE_TYPES[ctx.caseType]}
+وهذا توجيه لما تبحث عنه في الملف لا أكثر: لا تصنّف الدعوى بنفسك، ولا تضف عنصرًا لم يرد في المستندات نصًا لمجرد أنه معتاد في هذا النوع، ولا يغيّر هذا شيئًا من القواعد الملزمة أعلاه.` : body;
+}
+function stageBody(key, ctx) {
   const S = 'src:{"doc":"اسم المستند","page":0,"quote":"مقتبس حرفي قصير"}';
   switch (key) {
     case "overview": return `استخرج من المستندات المرفقة صورة القضية وأطرافها والمسائل المطروحة. لا تتجاوز 6 مسائل، وصِغ كل مسألة على شكل سؤال يبدأ بـ "هل" أو "ما".
@@ -527,14 +536,14 @@ function Home({ cases, onNew, onOpen, onSettings }) {
 }
 
 /* ───────────────────────── محرك التحليل ───────────────────────── */
-async function runStages(files, statutes, onStage, prev = {}, sendRaw = false) {
+async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, caseType = "") {
   const blocks = fileBlocks(files, sendRaw);
   const a = { ...prev, errors: {} };
   for (let i = 0; i < STAGES.length; i++) {
     const [key] = STAGES[i];
     onStage(i, "run");
     try {
-      const ctx = { issues: (a.issues || []).map((x) => x.title), statutes };
+      const ctx = { issues: (a.issues || []).map((x) => x.title), statutes, caseType };
       const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 8000));
       if (key === "overview") { a.summary = out.summary; a.parties = out.parties || []; a.issues = (out.issues || []).map((x) => ({ title: x.title })); a.meta = out.meta || {}; }
       else if (key === "facts") a.facts = out.facts || [];
@@ -607,7 +616,7 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
       if (unsaved.length) { setBusy(false); setErr(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح (قد تكون ممتلئة). احذف قضية قديمة أو قلّل حجم الملفات ثم أعد المحاولة.`); for (const fl of files) await sdel(`midad:file:${id}:${fl.id}`); return; }
       const st = [];
       const er = {};
-      const a = await runStages(files, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw);
+        const a = await runStages(files, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw, f.type);
       const meta = a.meta || {};
       const merged = { ...c, number: c.number || meta.number || "", court: c.court || meta.court || "", circuit: c.circuit || meta.circuit || "", subject: c.subject || meta.subject || "", analysis: a };
       onCreated(merged);
@@ -717,7 +726,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
     if (unsaved.length) setToast(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح.`);
     const prevA = c.analysis;
     const er = {};
-    const res = await runStages(all, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw);
+    const res = await runStages(all, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw, c.type);
     let whatsNew = c.whatsNew;
     if (prevA?.done && prevA.summary && newFiles.length) {
       try {
@@ -1458,7 +1467,10 @@ function AskBar({ c, loadFiles, update, openSrc }) {
 أعد JSON بهذا الشكل بالضبط: {"answer":"","items":[{"text":"المقطع حرفيًا","src":{"doc":"","page":0,"quote":""}}],"notFound":false}`
         : `السؤال: ${question}\nأجب من ملفات القضية المرفقة حصرًا. answer فقرة قصيرة واضحة. items: كل معلومة في الإجابة مع مصدرها الدقيق ومقتبس حرفي قصير. إن لم تجد الإجابة في الملفات فاجعل notFound صحيحًا وanswer فارغًا، ولا تخمّن.
 أعد JSON بهذا الشكل بالضبط: {"answer":"","items":[{"text":"","src":{"doc":"","page":0,"quote":""}}],"notFound":false}`;
-      const out = await pjOrFix(await llm(SYS, [...fileBlocks(files, c.sendRaw), { type: "text", text: prompt }], 4000));
+      const typed = CASE_TYPES[c.type] ? `${prompt}
+
+نوع الدعوى بحسب تسجيل القاضي: ${c.type}. لا تضف ما ليس في الملف لأجل هذا النوع.` : prompt;
+      const out = await pjOrFix(await llm(SYS, [...fileBlocks(files, c.sendRaw), { type: "text", text: typed }], 4000));
       update((x) => ({ ...x, chat: [...(x.chat || []), { role: "a", ...out, literal }] }));
     } catch (e) { update((x) => ({ ...x, chat: [...(x.chat || []), { role: "a", error: e.message }] })); }
     setBusy(false);
