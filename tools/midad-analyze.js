@@ -172,6 +172,56 @@ function check(file) {
   } };
 }
 
+/* ───────── حجب البيانات الشخصية ─────────
+   يُبقي آخر ثلاث خانات من كل رقم معرِّف ويستر الباقي بنجوم **بعدد الخانات نفسه**،
+   حتى يبقى اختلاف طول رقمين ظاهرًا للقاضي ولا يضيع بالحجب.
+   والأسماء يُبقى منها أول اسمين ويُستر الباقي. */
+const AR_D = "٠١٢٣٤٥٦٧٨٩";
+function maskNumbers(t, min, keep) {
+  return String(t).replace(new RegExp(`[0-9${AR_D}]{${min},}`, "g"), (m) => "*".repeat(m.length - keep) + m.slice(-keep));
+}
+function maskNames(t, names) {
+  let out = String(t);
+  // ١) الأسماء الكاملة أولًا، من الأطول إلى الأقصر
+  for (const full of [...names].sort((a, b) => b.length - a.length)) {
+    const parts = full.split(/\s+/).filter((w) => w && w !== "بن" && w !== "بنت");
+    if (parts.length < 3) continue;
+    out = out.split(full).join(`${parts[0]} ${parts[1]} ****`);
+  }
+  // ٢) ما بقي من ألقاب العائلة في صيغ مختصرة، أينما وردت
+  // لقب العائلة وحده يُكنس، لا كل ما بعد الاسم الثاني: فقد يكون اسمًا أول لشخص آخر في القضية.
+  const tails = new Set();
+  for (const full of names) {
+    const parts = full.split(/\s+/).filter((w) => w && w !== "بن" && w !== "بنت");
+    if (parts.length >= 3) tails.add(parts[parts.length - 1]);
+  }
+  for (const tail of [...tails].sort((a, b) => b.length - a.length)) {
+    out = out.replace(new RegExp(`(?:\\s(?:بن|بنت))?\\s?${tail}(?![\\u0621-\\u063A\\u0640-\\u064A\\u0671-\\u06D3])`, "g"), " ****");
+  }
+  // ٣) اجمع علامات الأسماء المتتالية فقط. لا تمسّ نجوم الأرقام (لا فراغ بينها وبين الخانات).
+  out = out.replace(/(\*{4})(?:\s+\*{4})+/g, "****");
+  return out.replace(/[ \t]{2,}/g, " ").replace(/\s+([،.,:؛)])/g, "$1").trim();
+}
+function redact(file, opts) {
+  const a = JSON.parse(fs.readFileSync(file, "utf8"));
+  let nNum = 0, nName = 0;
+  const walk = (v) => {
+    if (typeof v === "string") {
+      const m1 = opts.names.length ? maskNames(v, opts.names) : v;
+      if (m1 !== v) nName++;
+      const m2 = maskNumbers(m1, opts.min, opts.keep);
+      if (m2 !== m1) nNum++;
+      return m2;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") { const o = {}; for (const k of Object.keys(v)) o[k] = walk(v[k]); return o; }
+    return v;
+  };
+  const out = walk(a);
+  out.redacted = { at: Date.now(), rule: `أرقام من ${opts.min} خانة فأكثر: يبقى آخر ${opts.keep}؛ والأسماء: يبقى أول اسمين` };
+  fs.writeFileSync(file, JSON.stringify(out, null, 1));
+  return { nNum, nName };
+}
 /* ───────── الواجهة ───────── */
 const [cmd, ...rest] = process.argv.slice(2);
 try {
@@ -186,6 +236,15 @@ try {
     if (c.notes.length) { console.log("ملاحظات:"); c.notes.forEach((p) => console.log("  •", p)); }
     if (!c.problems.length) console.log("✓ البنية مطابقة والقواعد اللغوية سليمة.");
   }
+  else if (cmd === "redact") {
+    const names = (rest.find((x) => x.startsWith("--names=")) || "").replace("--names=", "").split(";").map((x) => x.trim()).filter(Boolean);
+    const min = +((rest.find((x) => x.startsWith("--min=")) || "--min=8").replace("--min=", ""));
+    const keep = +((rest.find((x) => x.startsWith("--keep=")) || "--keep=3").replace("--keep=", ""));
+    const r = redact(rest[0], { names, min, keep });
+    console.log(`حُجبت الأرقام في ${r.nNum} نصًا، والأسماء في ${r.nName} نصًا.`);
+    const c = check(rest[0]);
+    console.log(c.problems.length ? "مشكلات: " + c.problems.join(" | ") : "✓ البنية سليمة بعد الحجب.");
+  }
   else if (cmd === "check") {
     const c = check(rest[0]);
     console.log("الأعداد:", JSON.stringify(c.counts, null, 0));
@@ -195,7 +254,7 @@ try {
     process.exit(c.problems.length ? 1 : 0);
   }
   else {
-    console.log("الاستعمال:\n  node tools/midad-analyze.js prompt <مجلد> <مرحلة> [تحليل-جزئي.json]\n  node tools/midad-analyze.js merge <مجلد>\n  node tools/midad-analyze.js check <analysis.json>");
+    console.log("الاستعمال:\n  node tools/midad-analyze.js prompt <مجلد> <مرحلة> [تحليل-جزئي.json]\n  node tools/midad-analyze.js merge <مجلد>\n  node tools/midad-analyze.js check <analysis.json>\n  node tools/midad-analyze.js redact <analysis.json> --names='اسم كامل;اسم آخر' [--min=8] [--keep=3]");
     process.exit(1);
   }
 } catch (e) { console.error("خطأ:", e.message); process.exit(1); }
