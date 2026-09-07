@@ -1218,7 +1218,7 @@ function Issues({ a, c, update, openSrc, library, setNote, setToast }) {
           <Sec title="النصوص النظامية المرتبطة">
             {(it.laws || []).length ? it.laws.map((l, j) => (
               <div key={j} className="mb-2">
-                <div className="rounded-lg p-3 text-sm" style={{ background: C.grey, borderRight: `3px solid ${C.acc}` }}><div className="font-medium">{l.ref}</div><div className="text-xs mt-1" style={{ color: C.mute }}>{library.statutes.find((s) => l.ref?.includes(s.ref))?.text || ""}</div></div>
+                <div className="rounded-lg p-3 text-sm" style={{ background: C.grey, borderRight: `3px solid ${C.acc}` }}><div className="font-medium">{l.ref}</div><div className="text-xs mt-1" style={{ color: C.mute }}>{findStatute(library.statutes, l.ref)?.text || ""}</div></div>
                 <div className="text-xs mt-1 px-1" style={{ color: C.mute }}>تحليل مِداد: {l.why}</div>
               </div>
             )) : <span style={{ color: C.mute }}>{library.statutes.length ? "لم يرتبط بالمسألة نص من النصوص المضافة." : "لا نصوص نظامية مضافة. أضفها من قسم النصوص النظامية ثم أعد التحليل."}</span>}
@@ -1281,6 +1281,15 @@ function caseStatutes(c, library) {
   if (!picked.length) return [];
   return (library && library.statutes || []).filter((s) => picked.includes(String(s.system || "بلا نظام").trim()));
 }
+// «المادة (66) — نظام الإثبات» كانت تُطابق المادة (66) من أول نظام في المكتبة،
+// و«المادة (6)» تُطابق «المادة (66)». المطابقة الآن على الرقم كاملًا وعلى اسم النظام معًا.
+const refNum = (r) => { const m = String(r || "").match(/\(([^)]+)\)/); return m ? m[1].trim() : String(r || "").trim(); };
+function findStatute(statutes, lawRef) {
+  const want = refNum(lawRef);
+  const cands = (statutes || []).filter((s) => refNum(s.ref) === want);
+  if (cands.length < 2) return cands[0] || null;
+  return cands.find((s) => String(lawRef).includes(s.system)) || null;
+}
 const LIB_HELP = "الملف بصيغة JSON، وكل مادة فيه: ref (المادة) وsystem (النظام) وtext (النص)، ويمكن معها version وeffective.";
 
 function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast }) {
@@ -1297,7 +1306,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
   // حجم ما يُرسل فعلًا مع كل تحليل: النص الكامل لكل مادة معتمدة، ولا يشمله التخزين المؤقت.
   const sentChars = sent.reduce((t, x) => t + (x.text || "").length + String(x.path || "").split(">").pop().trim().length, 0);
   const heavy = sentChars > 60000;
-  const usedIn = (st) => (a.issues || []).filter((it) => (it.laws || []).some((l) => l.ref && st.ref && l.ref.includes(st.ref))).map((it) => it.title);
+  const usedIn = (st) => (a.issues || []).filter((it) => (it.laws || []).some((l) => findStatute([st], l.ref))).map((it) => it.title);
 
   const toggleSystem = (sys) => update((x) => {
     const cur = Array.isArray(x.systems) ? x.systems : [];
