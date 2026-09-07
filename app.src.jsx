@@ -1210,7 +1210,11 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
   const impRef = useRef();
   const groups = bySystem(library.statutes);
   const picked = Array.isArray(c.systems) ? c.systems : [];
-  const sentCount = caseStatutes(c, library).length;
+  const sent = caseStatutes(c, library);
+  const sentCount = sent.length;
+  // حجم ما يُرسل فعلًا مع كل تحليل: النص الكامل لكل مادة معتمدة، ولا يشمله التخزين المؤقت.
+  const sentChars = sent.reduce((t, x) => t + (x.text || "").length, 0);
+  const heavy = sentChars > 60000;
   const usedIn = (st) => (a.issues || []).filter((it) => (it.laws || []).some((l) => l.ref && st.ref && l.ref.includes(st.ref))).map((it) => it.title);
 
   const toggleSystem = (sys) => update((x) => {
@@ -1233,11 +1237,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
     setToast("نُزّلت نسخة من مكتبتك.");
   };
 
-  const importLib = async (file) => {
-    if (!file) return;
-    try {
-      if (file.size > 12 * 1024 * 1024) throw new Error("الملف أكبر من ١٢ ميجابايت.");
-      let j; try { j = JSON.parse((await file.text()).replace(/^\ufeff/, "")); } catch { throw new Error("الملف ليس JSON صالحًا. " + LIB_HELP); }
+  const merge = (j) => {
       const inSt = Array.isArray(j) ? j : (j && j.statutes) || [];
       const inPr = Array.isArray(j) ? [] : (j && j.principles) || [];
       const clean = inSt.filter((x) => x && x.ref && x.system && x.text).map((x) => ({
@@ -1254,7 +1254,25 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
       setLibrary((l) => ({ statutes: [...(l.statutes || []), ...fresh], principles: [...(l.principles || []), ...prFresh] }));
       const skipped = clean.length - fresh.length;
       setToast(`استُوردت ${arNum(fresh.length)} مادة${prFresh.length ? ` و${arNum(prFresh.length)} مبدأ` : ""}${skipped ? `، وتُخطّيت ${arNum(skipped)} موجودة` : ""}. اعتمد ما يخص هذه القضية ثم أعد التحليل.`);
+  };
+  const importLib = async (file) => {
+    if (!file) return;
+    try {
+      if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
+      let j; try { j = JSON.parse((await file.text()).replace(/^\ufeff/, "")); } catch { throw new Error("الملف ليس JSON صالحًا. " + LIB_HELP); }
+      merge(j);
     } catch (e) { setToast((e && e.message) || "تعذر استيراد الملف."); }
+  };
+  // المكتبة المرفقة بالموقع: الأنظمة التي حوّلها القاضي من ملفاته الخام.
+  const [fetching, setFetching] = useState(false);
+  const importBundled = async () => {
+    setFetching(true);
+    try {
+      const r = await fetch("library/anzima.json", { cache: "no-store" });
+      if (!r.ok) throw new Error(`تعذر جلب المكتبة من الموقع (${r.status}).`);
+      merge(await r.json());
+    } catch (e) { setToast((e && e.message) || "تعذر جلب المكتبة من الموقع."); }
+    setFetching(false);
   };
 
   const deleteSystem = (sys) => {
@@ -1267,20 +1285,24 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        <Btn small kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={14} /> استورد نصوصًا</Btn>
+        <Btn small onClick={importBundled} disabled={fetching}>{fetching ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} {fetching ? "يجلب…" : "استورد الأنظمة المرفقة"}</Btn>
+        <Btn small kind="ghost" onClick={() => impRef.current && impRef.current.click()}><Upload size={14} /> استورد من ملف</Btn>
         <Btn small kind="ghost" onClick={exportLib} disabled={!(library.statutes || []).length && !(library.principles || []).length}><Download size={14} /> صدّر مكتبتي</Btn>
         <Btn small onClick={() => { setForm({}); setAdd(true); }}><Plus size={14} /> أضف مادة</Btn>
         <input ref={impRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { importLib(e.target.files && e.target.files[0]); e.target.value = ""; }} />
       </div>
 
       {groups.length === 0 ? (
-        <Empty>مكتبتك فارغة. استورد ملف أنظمة، أو أضف مادة واحدة يدويًا. ولن يستشهد مِداد بأي مادة لم تضعها أنت.</Empty>
+        <Empty>مكتبتك فارغة. اضغط «استورد الأنظمة المرفقة» لإدخال الأنظمة المرفوعة مع الموقع، أو استورد ملفًا من جهازك، أو أضف مادة يدويًا. ولن يستشهد مِداد بأي مادة لم تضعها أنت.</Empty>
       ) : (
         <>
-          <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: sentCount ? C.accSoft : C.amberSoft, color: sentCount ? C.acc : C.amber }}>
-            {sentCount
-              ? `المعتمد في هذه القضية: ${arNum(picked.length)} نظام، ${arNum(sentCount)} مادة. لن يُرسل إلى النموذج غيرها.`
-              : "لم تعتمد أي نظام في هذه القضية بعد، فلن تُرسل أي مادة إلى النموذج وسيبقى قسم النصوص في المسائل فارغًا. أشّر على ما يخص هذه القضية أدناه."}
+          <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: !sentCount || heavy ? C.amberSoft : C.accSoft, color: !sentCount || heavy ? C.amber : C.acc }}>
+            {!sentCount
+              ? "لم تعتمد أي نظام في هذه القضية بعد، فلن تُرسل أي مادة إلى النموذج وسيبقى قسم النصوص في المسائل فارغًا. أشّر على ما يخص هذه القضية أدناه."
+              : <>
+                  المعتمد في هذه القضية: {arNum(picked.length)} نظام، {arNum(sentCount)} مادة، نحو {arNum(Math.round(sentChars / 1000))} ألف حرف تُرسل مع كل تحليل. لن يُرسل غيرها.
+                  {heavy && <span className="block mt-1">هذا حجم كبير: يرفع تكلفة كل تحليل ويصعّب على النموذج تمييز المادة المناسبة. اعتمد ما يخص هذه القضية وحدها.</span>}
+                </>}
           </div>
           <div className="relative mb-4">
             <Search size={14} className="absolute top-2.5 right-3" style={{ color: C.mute }} />

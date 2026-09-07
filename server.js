@@ -5,6 +5,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 
 const num = (v, def, min, max) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= min && n <= max ? n : def; };
 const PORT = num(process.env.PORT, 10000, 1, 65535);
@@ -20,8 +21,8 @@ const MAX_BODY = 64 * 1024 * 1024;
 const UPSTREAM = "https://api.anthropic.com/v1/messages";
 
 // الملفات العامة المسموح بتقديمها فقط (البقية، مثل server.js، لا تُعرض)
-const PUBLIC_FILES = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js" };
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8" };
+const PUBLIC_FILES = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/library/anzima.json": "library/anzima.json" };
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8" };
 
 const buckets = new Map();
 function rateOk(ip) {
@@ -104,7 +105,13 @@ function serveStatic(req, res, url) {
     if (err) return send(res, 404, "not found", "text/plain; charset=utf-8");
     const ext = path.extname(file);
     const cache = "no-cache";
+    // مكتبة الأنظمة تتجاوز ٢ ميجابايت؛ ضغطها يوفّر على جوال المستخدم كثيرًا.
+    const extra = {};
+    if (data.length > 64 * 1024 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
+      try { data = zlib.gzipSync(data); extra["Content-Encoding"] = "gzip"; } catch (e) { console.error("gzip:", e.message); }
+    }
     send(res, 200, data, MIME[ext] || "application/octet-stream", {
+      ...extra,
       "Cache-Control": cache,
       "X-Frame-Options": "SAMEORIGIN",
       "Referrer-Policy": "no-referrer",
