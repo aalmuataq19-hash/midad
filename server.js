@@ -92,7 +92,7 @@ function serveStatic(req, res, url) {
   fs.readFile(full, (err, data) => {
     if (err) return send(res, 404, "not found", "text/plain; charset=utf-8");
     const ext = path.extname(file);
-    const cache = ext === ".js" ? "public, max-age=86400" : "no-store";
+    const cache = "no-cache";
     send(res, 200, data, MIME[ext] || "application/octet-stream", {
       "Cache-Control": cache,
       "X-Frame-Options": "SAMEORIGIN",

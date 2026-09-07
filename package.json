@@ -1,13 +1,18 @@
 {
   "name": "midad-al-qadi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "مِداد القاضي — مساحة العمل الذكية لدراسة القضية",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "esbuild app.src.jsx --loader:.jsx=jsx --jsx=transform --format=iife --target=es2020 --minify-whitespace --outfile=app.js",
+    "dev": "node server.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   }
 }
