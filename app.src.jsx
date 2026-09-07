@@ -524,6 +524,8 @@ function Home({ cases, onNew, onOpen, onSettings }) {
 /* ───────────────────────── محرك التحليل ───────────────────────── */
 async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, caseType = "") {
   const blocks = fileBlocks(files, sendRaw);
+  // دفاع أخير: لا تُرسل ولا طلبًا واحدًا إن لم يصل مستند. الفشل هنا أرخص من ست مراحل فارغة.
+  if (!blocks.length) throw new Error("لا توجد مستندات في هذه القضية، فلم يُرسل أي طلب. ارفع ملفات القضية أولًا من «أضف ملفات إلى القضية».");
   const a = { ...prev, errors: {} };
   for (let i = 0; i < STAGES.length; i++) {
     const [key] = STAGES[i];
@@ -618,10 +620,12 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
       if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
       const a = readAnalysis(await file.text());
       const meta = a.meta || {};
+      const pOf = (r) => (a.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
       const id = uid();
       onCreated({
         id, ...f,
         number: f.number || meta.number || "", court: f.court || meta.court || "", circuit: f.circuit || meta.circuit || "", subject: f.subject || meta.subject || "",
+        plaintiff: f.plaintiff || pOf("مدعي") || "", defendant: f.defendant || pOf("مدعى عليه") || "",
         sendRaw: false, files: [], createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
         notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null, systems: [],
       });
@@ -754,7 +758,10 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
     try {
       if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
       const parsed = readAnalysis(await file.text());
-      update((x) => ({ ...x, analysis: parsed, prevAnalysis: x.analysis || null }));
+      const pOf = (r) => (parsed.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
+      update((x) => ({ ...x, analysis: parsed, prevAnalysis: x.analysis || null,
+        number: x.number || (parsed.meta || {}).number || "", court: x.court || (parsed.meta || {}).court || "", circuit: x.circuit || (parsed.meta || {}).circuit || "",
+        plaintiff: x.plaintiff || pOf("مدعي") || "", defendant: x.defendant || pOf("مدعى عليه") || "" }));
       setToast("استُبدل تحليل هذه القضية بالتحليل المستورد.");
     } catch (e) { setToast((e && e.message) || "تعذر استيراد الملف."); }
   };
@@ -764,8 +771,18 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
   const openSrc = (src) => setViewer({ srcs: [src] });
   const openPair = (s1, s2) => setViewer({ srcs: [s1, s2] });
 
+  const [confirmRe, setConfirmRe] = useState(null);
+  // تحليل بلا مستندات يرسل طلبات فارغة من ملفات القضية: تكلفة بلا فائدة، ويمحو دراسة مستوردة.
   const reanalyze = async (newFiles = []) => {
     if (reanalyzing) return;
+    const willHave = (c.files || []).length + newFiles.length;
+    if (!willHave) { setConfirmRe({ kind: "nofiles" }); return; }
+    if (!newFiles.length && a.imported) { setConfirmRe({ kind: "imported" }); return; }
+    doReanalyze(newFiles);
+  };
+  const doReanalyze = async (newFiles = []) => {
+    if (reanalyzing) return;
+    setConfirmRe(null);
     const st = []; setReanalyzing([...st]); setReErrs({});
     try {
     const all = [...(await loadFiles(c)), ...newFiles];
@@ -893,6 +910,26 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
       {panel === "gaps" && <Modal title="ما الذي يحتاج إلى تحقق؟" onClose={() => setPanel(null)}><GapsPanel a={a} update={update} setToast={setToast} /></Modal>}
       {panel === "new" && <Modal title="ما الجديد منذ آخر مراجعة؟" onClose={() => setPanel(null)}><WhatsNew c={c} go={(t) => { setSec(t === "requests" || t === "defenses" ? t : t === "conflicts" || t === "gaps" ? "overview" : t); setPanel(t === "conflicts" ? "conflicts" : t === "gaps" ? "gaps" : null); }} /></Modal>}
       {session && <Session c={c} a={a} update={update} onClose={() => setSession(false)} setToast={setToast} openSrc={openSrc} />}
+      {confirmRe && (
+        <Modal title={confirmRe.kind === "nofiles" ? "لا يمكن التحليل" : "استبدال الدراسة المستوردة"} onClose={() => setConfirmRe(null)}>
+          {confirmRe.kind === "nofiles" ? (
+            <>
+              <p className="text-sm leading-7 mb-4">لا توجد ملفات مرفوعة في هذه القضية، والتحليل يقرأ من ملفات القضية نفسها. لو بدأ الآن لأرسل طلبات بلا مستندات، فاستهلك من رصيدك بلا فائدة.</p>
+              <p className="text-sm leading-7 mb-4" style={{ color: C.mute }}>ارفع ملفات القضية من «أضف ملفات إلى القضية» ثم أعد المحاولة. وإن كانت دراستك مستوردة من ملف تحليل فهي معروضة كاملة ولا تحتاج تحليلًا.</p>
+              <Btn onClick={() => setConfirmRe(null)}>فهمت</Btn>
+            </>
+          ) : (
+            <>
+              <p className="text-sm leading-7 mb-4">هذه الدراسة <b>مستوردة</b> من ملف تحليل. وإعادة التحليل ستستهلك من رصيدك <b>وتستبدل الدراسة المستوردة بنتيجة جديدة</b>.</p>
+              <p className="text-sm leading-7 mb-4" style={{ color: C.mute }}>إن أردت النصوص النظامية فقط فأعد استيراد الملف بعدها، أو صدّر نسخة قبل المتابعة.</p>
+              <div className="flex flex-wrap gap-3">
+                <button onClick={() => doReanalyze([])} className="px-4 py-2 rounded-lg text-sm text-white" style={{ background: C.copper }}>تابع وأعد التحليل</button>
+                <Btn kind="ghost" onClick={() => setConfirmRe(null)}>إلغاء</Btn>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
       {confirmDel && (
         <Modal title="حذف القضية" onClose={() => setConfirmDel(false)}>
           <p className="text-sm leading-7 mb-4">سيُحذف ملف القضية وكل المستندات المرفوعة وكل ملاحظاتك نهائيًا، ولا يمكن استرجاعها.</p>
