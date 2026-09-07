@@ -159,48 +159,9 @@ async function testConnection() {
   const txt = await llm("أجب بكلمة واحدة فقط بلا أي إضافة.", [{ type: "text", text: "اكتب الكلمة: جاهز" }]);
   return { ok: true, ms: Date.now() - t0, txt: txt.trim().slice(0, 30) };
 }
-function repairJSON(t) {
-  let c = String(t || "").replace(/```json|```/gi, "").trim();
-  const s = c.indexOf("{");
-  if (s < 0) throw new Error("لا يوجد JSON في الإجابة");
-  c = c.slice(s);
-  let inStr = false, esc = false;
-  const stack = [];
-  let complete = -1, lastSafe = -1, safeStack = [];
-  for (let i = 0; i < c.length; i++) {
-    const ch = c[i];
-    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
-    if (ch === '"') inStr = true;
-    else if (ch === "{" || ch === "[") stack.push(ch);
-    else if (ch === "}" || ch === "]") {
-      stack.pop();
-      if (stack.length === 0) { complete = i; break; }
-      lastSafe = i; safeStack = stack.slice();
-    }
-  }
-  if (complete >= 0) {
-    const body = c.slice(0, complete + 1).replace(/,(\s*[}\]])/g, "$1");
-    return JSON.parse(body);
-  }
-  if (lastSafe < 0) throw new Error("الإجابة مقطوعة قبل أول عنصر مكتمل");
-  let out = c.slice(0, lastSafe + 1);
-  while (safeStack.length) { const o = safeStack.pop(); out += o === "{" ? "}" : "]"; }
-  out = out.replace(/,(\s*[}\]])/g, "$1");
-  return JSON.parse(out);
-}
+const { repairJSON, pj, createPjOrFix } = require("./src/json-repair.js");
 const FIX_SYS = "أنت مصلح JSON. تستلم نصًا يُفترض أنه JSON لكنه غير صالح، فتعيده JSON صالحًا تمامًا بنفس المحتوى والمفاتيح، بلا أي نص قبله أو بعده وبلا markdown. إن كان مقطوعًا فأغلقه بأقل تعديل ممكن دون اختراع بيانات.";
-function pj(t) {
-  try { return repairJSON(t); }
-  catch (e) { throw Object.assign(new Error(`تعذرت قراءة إجابة النموذج (${e.message}). بدايتها: ${String(t || "").slice(0, 100)}`), { raw: t, parseFail: true }); }
-}
-async function pjOrFix(text) {
-  try { return pj(text); }
-  catch (e1) {
-    if (!e1.parseFail) throw e1;
-    const fixed = await llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${String(text).slice(0, 60000)}` }], 6000);
-    return pj(fixed);
-  }
-}
+const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000));
 function fileBlocks(files, sendRaw = false) {
   const out = [];
   for (const f of files) {

@@ -6,8 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "esbuild app.src.jsx --loader:.jsx=jsx --jsx=transform --format=iife --target=es2020 --minify-whitespace --outfile=app.js",
-    "dev": "node server.js"
+    "build": "esbuild app.src.jsx --bundle --loader:.jsx=jsx --jsx=transform --format=iife --target=es2020 --minify-whitespace --outfile=app.js",
+    "dev": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
