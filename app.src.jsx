@@ -168,6 +168,12 @@ function readAnalysis(raw) {
   a.at = typeof j.at === "number" ? j.at : Date.now();
   a.imported = true;
   a.source = j.source || "ملف مستورد";
+  // نصوص المستندات إن رافقت التحليل: تُنقل عند الاستيراد إلى ملفات القضية ثم تُحذف من هنا،
+  // فلا يُخزَّن النص مرتين، ويعمل «اسأل ملف القضية» وعارض المستندات بلا رفع جديد.
+  a.docs = Array.isArray(j.docs)
+    ? j.docs.filter((d) => d && typeof d.name === "string" && d.name.trim() && typeof d.text === "string" && d.text.trim())
+        .map((d) => ({ name: d.name.trim(), text: d.text }))
+    : [];
   return a;
 }
 function fileBlocks(files, sendRaw = false, cache = true) {
@@ -619,17 +625,28 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
     try {
       if (file.size > 24 * 1024 * 1024) throw new Error("الملف أكبر من ٢٤ ميجابايت.");
       const a = readAnalysis(await file.text());
+      const docs = a.docs || [];
+      delete a.docs;
       const meta = a.meta || {};
       const pOf = (r) => (a.parties || []).filter((p) => (p.role || "").includes(r)).map((p) => p.name).filter(Boolean).join("، ");
       const id = uid();
+      const recs = docs.map((d) => ({ id: uid(), name: d.name, kind: "text", mime: "text/plain", data: d.text, size: d.text.length }));
+      const unsaved = [];
+      for (const fl of recs) { if (!(await sset(`midad:file:${id}:${fl.id}`, fl))) unsaved.push(fl.name); }
+      if (unsaved.length) {
+        for (const fl of recs) await sdel(`midad:file:${id}:${fl.id}`);
+        throw new Error(`تعذر حفظ نصوص المستندات (${unsaved.join("، ")}) في ذاكرة المتصفح. احذف قضية قديمة ثم أعد الاستيراد.`);
+      }
       onCreated({
         id, ...f,
         number: f.number || meta.number || "", court: f.court || meta.court || "", circuit: f.circuit || meta.circuit || "", subject: f.subject || meta.subject || "",
         plaintiff: f.plaintiff || pOf("مدعي") || "", defendant: f.defendant || pOf("مدعى عليه") || "",
-        sendRaw: false, files: [], createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
+        sendRaw: false, files: recs.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size })), createdAt: Date.now(), updatedAt: Date.now(), analysis: a,
         notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null, systems: [],
       });
-      setToast("استُورد التحليل. الملفات الأصلية ليست معه، فأضفها إن أردت السؤال عنها.");
+      setToast(recs.length
+        ? `استُورد التحليل ومعه نص ${arNum(recs.length)} من المستندات، فيعمل «اسأل ملف القضية» مباشرة.`
+        : "استُورد التحليل. نصوص المستندات ليست معه، فأضفها إن أردت السؤال عنها.");
     } catch (e) { setErr((e && e.message) || "تعذر استيراد الملف."); }
   };
   const start = async () => {
@@ -873,7 +890,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
               {a.imported && (
                 <div className="rounded-lg p-4 mb-6 text-sm leading-7" style={{ background: C.accSoft, color: C.acc }}>
                   هذه دراسة <b>مستوردة</b> من ملف تحليل، لا من تحليل جرى داخل الموقع. تُعرض كاملة في الأقسام العشرة، وتقدر تكتب ملاحظاتك وتنشئ مذكرة الدراسة منها.
-                  {!(c.files || []).length && <span className="block mt-1">ملفات القضية الأصلية ليست معها، فلا يعمل «اسأل ملف القضية» ولا عارض المستندات حتى ترفع الملفات من «أضف ملفات إلى القضية».</span>}
+                  {!(c.files || []).length && <span className="block mt-1">نصوص المستندات ليست مع هذا التحليل، فلا يعمل «اسأل ملف القضية» ولا عارض المستندات حتى ترفع الملفات من «أضف ملفات إلى القضية».</span>}
                 </div>
               )}
               {a.errors && Object.keys(a.errors).length > 0 && (

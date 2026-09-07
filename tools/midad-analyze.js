@@ -109,7 +109,7 @@ function printPrompt(dir, stage, prevPath) {
 }
 
 /* ───────── دمج المراحل: التعيين نفسه الذي في runStages ───────── */
-function merge(dir) {
+function merge(dir, opts = {}) {
   const d = path.join(dir, ".midad");
   const a = { errors: {} };
   const missing = [];
@@ -130,9 +130,27 @@ function merge(dir) {
   a.done = true;
   a.at = Date.now();
   a.source = "claude-code";
+  // نصوص المستندات تُحفظ داخل التحليل نفسه، فيعمل «اسأل ملف القضية» وعارض المستندات
+  // بعد الاستيراد بلا رفع جديد. ولأنها داخل الملف فإن أمر redact يحجبها كما يحجب سائره.
+  const embedded = [], skipped = [];
+  if (opts.docs !== false) {
+    const { docs, needRead } = readCase(dir);
+    const want = opts.only && opts.only.size ? opts.only : null;
+    const seen = new Set();
+    for (const d of docs) {
+      const as = want ? want.get(d.name) : d.name;
+      if (want && as === undefined) continue;
+      seen.add(d.name);
+      if (d.error || !String(d.text || "").trim()) { skipped.push(`${d.name} (لا نص)`); continue; }
+      embedded.push({ name: as, text: d.text });
+    }
+    for (const f of needRead) if (!want || want.has(f.name)) skipped.push(`${f.name} (صيغة لا تُقرأ هنا)`);
+    if (want) for (const n of want.keys()) if (!seen.has(n) && !needRead.some((f) => f.name === n)) skipped.push(`${n} (غير موجود)`);
+    if (embedded.length) a.docs = embedded;
+  }
   const target = path.join(dir, "analysis.json");
   fs.writeFileSync(target, JSON.stringify(a, null, 1));
-  return { target, a, missing };
+  return { target, a, missing, embedded, skipped };
 }
 
 /* ───────── فحص البنية والقواعد اللغوية ───────── */
@@ -227,9 +245,21 @@ const [cmd, ...rest] = process.argv.slice(2);
 try {
   if (cmd === "prompt") { console.log(printPrompt(rest[0], rest[1], rest[2])); }
   else if (cmd === "merge") {
-    const r = merge(rest[0]);
+    // --docs=ملف.txt:اسم المستند,ملف٢.txt   يختار المستندات ويسمّيها كما وردت في src.doc
+    const noDocs = rest.includes("--no-docs");
+    const sel = (rest.find((x) => x.startsWith("--docs=")) || "").replace("--docs=", "");
+    const only = new Map();
+    for (const part of sel.split(",").map((x) => x.trim()).filter(Boolean)) {
+      const i = part.indexOf(":");
+      if (i < 0) only.set(part, part);
+      else only.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+    }
+    const r = merge(rest[0], { docs: !noDocs, only: only.size ? only : null });
     console.log(`كُتب: ${r.target}`);
     if (r.missing.length) console.log(`مراحل ناقصة: ${r.missing.join("، ")}`);
+    if (r.embedded && r.embedded.length) console.log(`نصوص المستندات المضمَّنة: ${r.embedded.map((d) => `${d.name} (${d.text.length} حرفًا)`).join("، ")}`);
+    else if (!noDocs) console.log("لم يُضمَّن أي نص مستند: «اسأل ملف القضية» لن يعمل بعد الاستيراد.");
+    if (r.skipped && r.skipped.length) console.log(`لم تُضمَّن: ${r.skipped.join("، ")}`);
     const c = check(r.target);
     console.log("الأعداد:", JSON.stringify(c.counts, null, 0));
     if (c.problems.length) { console.log("مشكلات:"); c.problems.forEach((p) => console.log("  ✗", p)); }
@@ -254,7 +284,7 @@ try {
     process.exit(c.problems.length ? 1 : 0);
   }
   else {
-    console.log("الاستعمال:\n  node tools/midad-analyze.js prompt <مجلد> <مرحلة> [تحليل-جزئي.json]\n  node tools/midad-analyze.js merge <مجلد>\n  node tools/midad-analyze.js check <analysis.json>\n  node tools/midad-analyze.js redact <analysis.json> --names='اسم كامل;اسم آخر' [--min=8] [--keep=3]");
+    console.log("الاستعمال:\n  node tools/midad-analyze.js prompt <مجلد> <مرحلة> [تحليل-جزئي.json]\n  node tools/midad-analyze.js merge <مجلد> [--docs='ملف.txt:اسم المستند,ملف٢.txt'] [--no-docs]\n  node tools/midad-analyze.js check <analysis.json>\n  node tools/midad-analyze.js redact <analysis.json> --names='اسم كامل;اسم آخر' [--min=8] [--keep=3]");
     process.exit(1);
   }
 } catch (e) { console.error("خطأ:", e.message); process.exit(1); }
