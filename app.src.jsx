@@ -64,11 +64,12 @@ const DB = (() => {
   let p = null;
   const open = () => p || (p = new Promise((res, rej) => { const r = indexedDB.open("midad-al-qadi", 1); r.onupgradeneeded = () => r.result.createObjectStore("kv"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }));
   const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction("kv", mode); const req = fn(t.objectStore("kv")); t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error); }); };
-  return { get: (k) => tx("readonly", (st) => st.get(k)), set: (k, v) => tx("readwrite", (st) => st.put(v, k)), del: (k) => tx("readwrite", (st) => st.delete(k)) };
+  return { get: (k) => tx("readonly", (st) => st.get(k)), set: (k, v) => tx("readwrite", (st) => st.put(v, k)), del: (k) => tx("readwrite", (st) => st.delete(k)), keys: () => tx("readonly", (st) => st.getAllKeys()) };
 })();
 const sget = async (k) => { try { const v = await DB.get(k); return v === undefined ? null : v; } catch { return null; } };
 const sset = async (k, v) => { try { await DB.set(k, JSON.parse(JSON.stringify(v))); return true; } catch (e) { console.error(e); return false; } };
-const sdel = async (k) => { try { await DB.del(k); } catch { } };
+const sdel = async (k) => { try { await DB.del(k); return true; } catch { return false; } };
+const skeys = async () => { try { return (await DB.keys()) || []; } catch { return []; } };
 const ls = { get: (k) => { try { return localStorage.getItem(k) || ""; } catch { return window.__ls?.[k] || ""; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { (window.__ls ||= {})[k] = v; } } };
 const getKey = () => ls.get("midad:key").trim();
 const getPass = () => ls.get("midad:pass").trim();
@@ -138,7 +139,7 @@ async function llm(system, content, maxTokens = 4000) {
         if (type === "midad_config") throw Object.assign(new Error(`إعداد الخادم غير مكتمل: ${msg}`), { final: true });
         if (type === "midad_rate") throw Object.assign(new Error("طلبات كثيرة في وقت قصير. انتظر دقيقة ثم أعد المحاولة."), { final: true });
         if (type === "midad_upstream") throw Object.assign(new Error(msg), { final: true });
-        if (type === "authentication_error") throw Object.assign(new Error(proxy ? "مفتاح API المضبوط في الخادم غير صحيح. راجع config.php." : "المفتاح غير صحيح أو غير مفعّل. تأكد من نسخه كاملًا من console.anthropic.com."), { final: true });
+        if (type === "authentication_error") throw Object.assign(new Error(proxy ? "مفتاح API المضبوط في الخادم غير صحيح. راجع متغير ANTHROPIC_API_KEY في إعدادات الخادم." : "المفتاح غير صحيح أو غير مفعّل. تأكد من نسخه كاملًا من console.anthropic.com."), { final: true });
         if (type === "permission_error") throw Object.assign(new Error(`ليس للمفتاح صلاحية: ${msg}`), { final: true });
         if (type === "not_found_error" && /model/i.test(msg)) { lastErr = new Error(`النموذج ${model} غير متاح لحسابك.`); continue; }
         if (type === "invalid_request_error" && /credit|billing|balance/i.test(msg)) throw Object.assign(new Error("الرصيد غير كافٍ. أضف رصيدًا من Add funds في console.anthropic.com ثم أعد المحاولة."), { final: true });
@@ -149,7 +150,7 @@ async function llm(system, content, maxTokens = 4000) {
     } catch (e) {
       if (e.final) throw e;
       lastErr = e;
-      if (/Failed to fetch|NetworkError|Load failed/i.test(e.message || "")) throw new Error(proxy ? "تعذر الوصول إلى خادم الموقع (api.php). أعد تحميل الصفحة، وإن استمر فراجع ملفات الخادم." : "تعذر الوصول إلى api.anthropic.com. تأكد من الاتصال بالإنترنت، وأن الصفحة مفتوحة في متصفح حديث (Chrome أو Edge أو Safari).");
+      if (/Failed to fetch|NetworkError|Load failed/i.test(e.message || "")) throw new Error(proxy ? "تعذر الوصول إلى خادم الموقع. أعد تحميل الصفحة، وإن استمر فتأكد أن الخدمة تعمل." : "تعذر الوصول إلى api.anthropic.com. تأكد من الاتصال بالإنترنت، وأن الصفحة مفتوحة في متصفح حديث (Chrome أو Edge أو Safari).");
     }
   }
   throw lastErr || new Error("تعذر الاتصال بالنموذج");
@@ -165,6 +166,9 @@ const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أ�
 function fileBlocks(files, sendRaw = false) {
   const out = [];
   for (const f of files) {
+    // مستند بلا نص مستخرج يرفضه الـ API ويُفشل كل المراحل، فيُستبدل بسطر يوضح حاله.
+    if (f.kind === "text" && !String(f.data || "").trim()) { out.push({ type: "text", text: `المستند «${f.name}» مرفوع لكن لم يُستخرج منه نص (قد يكون صورًا داخل ملف Word). لا تستخرج منه شيئًا.` }); continue; }
+    if (f.kind === "pdf" && !f.data && !String(f.text || "").trim()) { out.push({ type: "text", text: `المستند «${f.name}» تعذرت قراءته.` }); continue; }
     if (f.kind === "pdf") {
       if (!sendRaw && f.text && f.text.length > 300) out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.text }, title: f.name });
       else out.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: f.data }, title: f.name });
@@ -239,7 +243,8 @@ async function extractPdfText(buf) {
 const IMG_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 async function readFile(file) {
   const name = file.name, lower = name.toLowerCase();
-  if (file.size > 6 * 1024 * 1024) throw new Error(`الملف «${name}» أكبر من الحد المسموح (6 ميجابايت). قسّمه أو اضغطه ثم أعد رفعه.`);
+  if (!file.size) throw new Error(`الملف «${name}» فارغ.`);
+  if (file.size > 6 * 1024 * 1024) throw new Error(`الملف «${name}» حجمه ${fmtSize(file.size)}، والحد المسموح 6 ميجابايت. قسّمه أو اضغطه ثم أعد رفعه.`);
   if (lower.endsWith(".pdf")) {
     const data = await toB64(file);
     let text = "", pages = 0;
@@ -248,8 +253,8 @@ async function readFile(file) {
   }
   const ext = (lower.match(/\.(png|jpe?g|webp|gif)$/) || [])[1];
   if (ext) return { id: uid(), name, kind: "image", mime: IMG_MIME[ext] || "image/jpeg", data: await toB64(file), size: file.size };
-  if (lower.endsWith(".docx")) { if (!window.mammoth) throw new Error("مكتبة قراءة Word لم تُحمَّل. تأكد من الاتصال بالإنترنت وأعد تحميل الصفحة."); const ab = await file.arrayBuffer(); const r = await window.mammoth.extractRawText({ arrayBuffer: ab }); return { id: uid(), name, kind: "text", mime: "text/plain", data: r.value, size: file.size }; }
-  if (lower.endsWith(".txt") || lower.endsWith(".md")) return { id: uid(), name, kind: "text", mime: "text/plain", data: await file.text(), size: file.size };
+  if (lower.endsWith(".docx")) { if (!window.mammoth) throw new Error("مكتبة قراءة Word لم تُحمَّل. تأكد من الاتصال بالإنترنت وأعد تحميل الصفحة."); const ab = await file.arrayBuffer(); const r = await window.mammoth.extractRawText({ arrayBuffer: ab }); if (!String(r.value || "").trim()) throw new Error(`الملف «${name}» لم يُستخرج منه نص. إن كان صورًا داخل Word فاحفظه PDF أو ارفع الصور نفسها.`); return { id: uid(), name, kind: "text", mime: "text/plain", data: r.value, size: file.size }; }
+  if (lower.endsWith(".txt") || lower.endsWith(".md")) { const t = await file.text(); if (!t.trim()) throw new Error(`الملف «${name}» فارغ.`); return { id: uid(), name, kind: "text", mime: "text/plain", data: t, size: file.size }; }
   throw new Error(`صيغة غير مدعومة: «${name}». المدعوم: PDF، Word (docx)، صور، نص.`);
 }
 const fmtSize = (b) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} م.ب` : `${Math.round(b / 1024)} ك.ب`;
@@ -422,9 +427,16 @@ function App() {
     return out;
   };
   const deleteCase = async (c) => {
-    for (const m of c.files) await sdel(`midad:file:${c.id}:${m.id}`);
+    // بالبادئة لا بالقائمة: يضمن حذف أي ملف حُفظ ثم تعثّر تسجيله في القضية.
+    const prefix = `midad:file:${c.id}:`;
+    const all = await skeys();
+    const hit = all.filter((k) => typeof k === "string" && k.startsWith(prefix));
+    const targets = hit.length ? hit : (c.files || []).map((m) => `${prefix}${m.id}`);
+    let failed = 0;
+    for (const k of targets) { if (!(await sdel(k))) failed++; }
     setCases((cs) => cs.filter((x) => x.id !== c.id));
-    setActiveId(null); setView("home"); setToast("حُذفت القضية وملفاتها نهائيًا.");
+    setActiveId(null); setView("home");
+    setToast(failed ? `حُذفت القضية، وتعذر حذف ${arNum(failed)} ملف من ذاكرة المتصفح.` : "حُذفت القضية وملفاتها نهائيًا.");
   };
 
   return (
@@ -525,7 +537,7 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false) {
       else if (key === "issues") { const det = out.issues || []; a.issues = (a.issues || []).map((x, j) => ({ ...x, ...(det[j] || {}), title: x.title })); }
       else if (key === "review") { a.conflicts = out.conflicts || []; a.gaps = out.gaps || []; }
       onStage(i, "ok");
-    } catch (e) { a.errors[key] = e.message; onStage(i, "err", e.message); }
+    } catch (e) { const m = (e && e.message) || String(e) || "خطأ غير معروف"; a.errors[key] = m; onStage(i, "err", m); }
   }
   a.done = true; a.at = Date.now();
   return a;
@@ -580,18 +592,26 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
   };
   const start = async () => {
     if (!files.length) { setErr("ارفع ملفًا واحدًا على الأقل قبل بدء التحليل."); return; }
-    setBusy(true);
+    setErr(""); setBusy(true);
     const id = uid();
-    for (const fl of files) await sset(`midad:file:${id}:${fl.id}`, fl);
     const c = { id, ...f, sendRaw, files: files.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size })), createdAt: Date.now(), updatedAt: Date.now(), analysis: null, notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null };
-    const st = [];
-    const er = {};
-    const a = await runStages(files, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw);
-    const meta = a.meta || {};
-    const merged = { ...c, number: c.number || meta.number || "", court: c.court || meta.court || "", circuit: c.circuit || meta.circuit || "", subject: c.subject || meta.subject || "", analysis: a };
-    onCreated(merged);
-    const failed = Object.keys(a.errors || {}).length;
-    setToast(failed ? `اكتمل التحليل مع ${arNum(failed)} قسم تعذر. يمكنك إعادته من داخل القضية.` : "اكتمل ترتيب الملف.");
+    try {
+      const unsaved = [];
+      for (const fl of files) { if (!(await sset(`midad:file:${id}:${fl.id}`, fl))) unsaved.push(fl.name); }
+      if (unsaved.length) { setBusy(false); setErr(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح (قد تكون ممتلئة). احذف قضية قديمة أو قلّل حجم الملفات ثم أعد المحاولة.`); for (const fl of files) await sdel(`midad:file:${id}:${fl.id}`); return; }
+      const st = [];
+      const er = {};
+      const a = await runStages(files, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw);
+      const meta = a.meta || {};
+      const merged = { ...c, number: c.number || meta.number || "", court: c.court || meta.court || "", circuit: c.circuit || meta.circuit || "", subject: c.subject || meta.subject || "", analysis: a };
+      onCreated(merged);
+      const failed = Object.keys(a.errors || {}).length;
+      setToast(failed ? `اكتمل التحليل مع ${arNum(failed)} قسم تعذر. يمكنك إعادته من داخل القضية.` : "اكتمل ترتيب الملف.");
+    } catch (e) {
+      // القضية تُفتح على كل حال حتى لا تضيع الملفات المحفوظة ويمكن حذفها أو إعادة تحليلها.
+      onCreated({ ...c, analysis: { done: false, errors: { overview: (e && e.message) || String(e) } } });
+      setToast("تعذر بدء التحليل. فُتحت القضية بملفاتها، وتقدر تعيد التحليل من داخلها.");
+    } finally { setBusy(false); }
   };
   if (busy) return <div className="max-w-xl mx-auto px-6 pt-24"><Progress status={status} errs={errs} /></div>;
   return (
@@ -680,9 +700,15 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
   const openPair = (s1, s2) => setViewer({ srcs: [s1, s2] });
 
   const reanalyze = async (newFiles = []) => {
-    const st = []; setReanalyzing([...st]);
+    if (reanalyzing) return;
+    const st = []; setReanalyzing([...st]); setReErrs({});
+    try {
     const all = [...(await loadFiles(c)), ...newFiles];
-    for (const fl of newFiles) await sset(`midad:file:${c.id}:${fl.id}`, fl);
+    const unsaved = [];
+    for (const fl of newFiles) { if (!(await sset(`midad:file:${c.id}:${fl.id}`, fl))) unsaved.push(fl.name); }
+    // تُسجَّل الملفات الجديدة في القضية فورًا حتى لا تبقى في ذاكرة المتصفح بلا مالك لو تعثر التحليل.
+    if (newFiles.length) update((x) => ({ ...x, files: [...(x.files || []), ...newFiles.filter((fl) => !unsaved.includes(fl.name)).map(({ id, name, kind, size }) => ({ id, name, kind, size }))] }));
+    if (unsaved.length) setToast(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح.`);
     const prevA = c.analysis;
     const er = {};
     const res = await runStages(all, library.statutes, (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw);
@@ -696,10 +722,12 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
         whatsNew = { ...(await pjOrFix(txt)), at: Date.now(), files: newFiles.map((x) => x.name) };
       } catch (e) { whatsNew = { changes: [], unchanged: "", error: e.message, at: Date.now() }; }
     }
-    update((x) => ({ ...x, files: [...x.files, ...newFiles.map(({ id, name, kind, size }) => ({ id, name, kind, size }))], analysis: res, prevAnalysis: prevA, whatsNew, memoVersions: x.memoVersions }));
-    setReanalyzing(null);
+    update((x) => ({ ...x, analysis: res, prevAnalysis: prevA, whatsNew, memoVersions: x.memoVersions }));
     setToast(newFiles.length ? "أُضيفت الملفات وأُعيد ترتيب الدراسة." : "أُعيد ترتيب الدراسة.");
     if (newFiles.length && prevA?.done && prevA.summary) setPanel("new");
+    } catch (e) {
+      setToast(`تعذر إعادة التحليل: ${(e && e.message) || e}`);
+    } finally { setReanalyzing(null); }
   };
   const addMore = async (list) => {
     const out = [];
@@ -764,7 +792,7 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
                   <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
                     <button className="underline" onClick={() => reanalyze([])}>أعد التحليل</button>
                     <button className="underline" onClick={runTest}>اختبر الاتصال</button>
-                    {c.files.some((x) => x.kind === "pdf") && <button className="underline" onClick={() => update((x) => ({ ...x, sendRaw: !x.sendRaw }))}>{c.sendRaw ? "أرسل PDF كنص مستخرج" : "أرسل PDF كما هو"}</button>}
+                    {(c.files || []).some((x) => x.kind === "pdf") && <button className="underline" onClick={() => update((x) => ({ ...x, sendRaw: !x.sendRaw }))}>{c.sendRaw ? "أرسل PDF كنص مستخرج" : "أرسل PDF كما هو"}</button>}
                     {conn?.busy && <span className="inline-flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> يختبر…</span>}
                     {conn && !conn.busy && <span style={{ color: conn.ok ? C.acc : C.copper }}>{conn.msg}</span>}
                   </div>
@@ -1009,7 +1037,7 @@ function Defenses({ a, c, openSrc, setNote }) {
 /* ───────────────────────── ٦. الأدلة ───────────────────────── */
 function Evidence({ a, openSrc }) {
   const [sort, setSort] = useState("doc");
-  const rows = [...(a.evidence || [])].sort((x, y) => (x[sort] || "").localeCompare(y[sort] || "", "ar"));
+  const rows = [...(a.evidence || [])].filter(Boolean).sort((x, y) => String(x[sort] ?? "").localeCompare(String(y[sort] ?? ""), "ar"));
   const cols = [["doc", "المستند"], ["by", "مقدم المستند"], ["purpose", "ما الذي يراد إثباته بحسب مقدم المستند"], ["issue", "المسألة المرتبطة"]];
   return (
     <div>
@@ -1300,9 +1328,10 @@ function Memo({ c, a, update, library, setToast }) {
     update((x) => ({ ...x, memoVersions: [...(x.memoVersions || []), { id: uid(), at: Date.now(), text }] }));
     setToast("أُنشئت مذكرة الدراسة.");
   };
+  const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const exportWord = () => {
     const secs = doc || buildMemo(c, a, library);
-    const html = `<html dir="rtl"><head><meta charset="utf-8"><style>body{font-family:Arial;line-height:1.8} h1{font-size:20pt} h2{font-size:14pt;margin-top:18pt} p{margin:4pt 0}</style></head><body><h1>مذكرة دراسة — ${c.number || ""}</h1>${secs.map(([t, ls]) => `<h2>${t}</h2>${ls.length ? ls.map((l) => `<p>${l}</p>`).join("") : "<p>—</p>"}`).join("")}<h2>اتجاه الدراسة</h2><p>${(c.direction || "").replace(/\n/g, "<br/>") || "&nbsp;"}</p></body></html>`;
+    const html = `<html dir="rtl"><head><meta charset="utf-8"><style>body{font-family:Arial;line-height:1.8} h1{font-size:20pt} h2{font-size:14pt;margin-top:18pt} p{margin:4pt 0}</style></head><body><h1>مذكرة دراسة — ${esc(c.number)}</h1>${secs.map(([t, ls]) => `<h2>${esc(t)}</h2>${ls.length ? ls.map((l) => `<p>${esc(l)}</p>`).join("") : "<p>—</p>"}`).join("")}<h2>اتجاه الدراسة</h2><p>${esc(c.direction).replace(/\n/g, "<br/>") || "&nbsp;"}</p></body></html>`;
     const blob = new Blob(["\ufeff", html], { type: "application/msword" });
     const u = URL.createObjectURL(blob); const el = document.createElement("a"); el.href = u; el.download = `مذكرة-الدراسة-${c.number || "قضية"}.doc`; el.click(); URL.revokeObjectURL(u);
   };
@@ -1517,7 +1546,7 @@ function Pane({ src, files, onPick }) {
 function Viewer({ c, srcs, loadFiles, onClose, onAddPair }) {
   const [files, setFiles] = useState(null);
   const [list, setList] = useState(srcs);
-  useEffect(() => { loadFiles(c).then(setFiles); }, [c.id]);
+  useEffect(() => { let live = true; loadFiles(c).then((fs) => live && setFiles(fs)).catch(() => live && setFiles([])); return () => { live = false; }; }, [c.id]);
   useEffect(() => { setList(srcs); }, [srcs]);
   const two = list.length === 2;
   return (
