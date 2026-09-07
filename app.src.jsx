@@ -190,6 +190,8 @@ const STAGES = [
   ["reqdef", "الطلبات والدفوع"], ["evidence", "الأدلة والمستندات"],
   ["issues", "ربط المسائل بمصادرها"], ["review", "التعارضات وما يحتاج إلى تحقق"],
 ];
+// آخر جزء من المسار البنيوي هو عنوان الفرع/الفصل، وفيه موضوع المادة. يُرسل وحده لا المسار كله.
+const lastPart = (p) => String(p || "").split(">").pop().trim();
 function stagePrompt(key, ctx) {
   const S = 'src:{"doc":"اسم المستند","page":0,"quote":"مقتبس حرفي قصير"}';
   const body = stageBody(key, ctx);
@@ -217,7 +219,7 @@ function stageBody(key, ctx) {
 ${ctx.issues.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 لكل مسألة: pl ما يستند إليه المدعي (سطران)، df ما يستند إليه المدعى عليه (سطران)، evidence أسماء المستندات المرتبطة، questions ثلاثة أسئلة يمكن أن يوجهها القاضي للأطراف لتوضيح ما لم يتضح في الملف عن هذه المسألة.
 laws: النصوص النظامية المرتبطة، ولا تستخدم إلا النصوص التالية التي أضافها القاضي حصرًا، وإن لم تكن هناك نصوص أو لم يرتبط شيء منها بالمسألة فاجعل المصفوفة فارغة. لا تستشهد بأي مادة من خارج هذه القائمة مهما كانت معرفتك بها:
-${ctx.statutes.length ? ctx.statutes.map((s) => `- ${s.ref} — ${s.system} (نفاذ: ${s.effective || "غير محدد"}): ${s.text}`).join("\n") : "(لا توجد نصوص مضافة)"}
+${ctx.statutes.length ? ctx.statutes.map((s) => `- ${s.ref} — ${s.system}${lastPart(s.path) ? ` [${lastPart(s.path)}]` : ""}: ${s.text}`).join("\n") : "(لا توجد نصوص مضافة)"}
 أعد JSON بهذا الشكل بالضبط، وبنفس ترتيب المسائل وعددها:
 {"issues":[{"title":"","pl":"","df":"","evidence":[""],"laws":[{"ref":"المادة (x) — نظام y","why":"سطر يبين وجه الارتباط دون ترجيح"}],"questions":["","",""]}]}`;
     case "review": return `ابحث في الملف عن تعارضات محتملة: اختلاف تواريخ لنفس الحدث، اختلاف مبالغ لنفس المطالبة، تناقض أقوال الطرف الواحد بين موضعين، مستندات تشير إلى وقائع مختلفة، طلب ورد في موضع ولم يرد في موضع آخر. لا تتجاوز 6. اعرض الطرفين a و b بمصدر كل منهما. انتبه: التاريخ الهجري والميلادي لنفس اليوم ليسا تعارضًا، والرقم بالأرقام العربية والهندية ليس تعارضًا.
@@ -1213,7 +1215,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
   const sent = caseStatutes(c, library);
   const sentCount = sent.length;
   // حجم ما يُرسل فعلًا مع كل تحليل: النص الكامل لكل مادة معتمدة، ولا يشمله التخزين المؤقت.
-  const sentChars = sent.reduce((t, x) => t + (x.text || "").length, 0);
+  const sentChars = sent.reduce((t, x) => t + (x.text || "").length + String(x.path || "").split(">").pop().trim().length, 0);
   const heavy = sentChars > 60000;
   const usedIn = (st) => (a.issues || []).filter((it) => (it.laws || []).some((l) => l.ref && st.ref && l.ref.includes(st.ref))).map((it) => it.title);
 
@@ -1242,7 +1244,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
       const inPr = Array.isArray(j) ? [] : (j && j.principles) || [];
       const clean = inSt.filter((x) => x && x.ref && x.system && x.text).map((x) => ({
         id: uid(), ref: String(x.ref).trim(), system: String(x.system).trim(), text: String(x.text).trim(),
-        version: String(x.version || "").trim(), effective: String(x.effective || "").trim(),
+        path: String(x.path || "").trim(), version: String(x.version || "").trim(), effective: String(x.effective || "").trim(),
       }));
       if (!clean.length) throw new Error("لم يُعثر في الملف على مواد. " + LIB_HELP);
       const have = new Set((library.statutes || []).map((x) => `${x.system}|${x.ref}`));
@@ -1306,10 +1308,10 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
           </div>
           <div className="relative mb-4">
             <Search size={14} className="absolute top-2.5 right-3" style={{ color: C.mute }} />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث في نص المواد أو أرقامها…" className="w-full rounded-lg pr-9 pl-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث في نص المواد وأبوابها وأرقامها…" className="w-full rounded-lg pr-9 pl-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }} />
           </div>
           {groups.map(({ system, items }) => {
-            const hits = q ? items.filter((x) => `${x.ref} ${x.text}`.includes(q)) : items;
+            const hits = q ? items.filter((x) => `${x.ref} ${x.text} ${x.path || ""}`.includes(q)) : items;
             if (q && !hits.length) return null;
             const isOpen = q ? true : !!open[system];
             const shown = hits.slice(0, 40);
@@ -1340,6 +1342,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
                       <div className="text-sm font-medium">{st.ref}</div>
                       <button onClick={() => setLibrary((l) => ({ ...l, statutes: (l.statutes || []).filter((x) => x.id !== st.id) }))} style={{ color: C.mute }}><X size={13} /></button>
                     </div>
+                    {st.path && <div className="text-xs leading-6" style={{ color: C.mute }}>{st.path}</div>}
                     {(st.version || st.effective) && <div className="text-xs" style={{ color: C.mute }}>{st.version ? `النسخة: ${st.version}` : ""}{st.effective ? ` — النفاذ: ${st.effective}` : ""}</div>}
                     <div className="rounded-lg p-3 mt-1 text-sm leading-7" style={{ background: C.grey, borderRight: `3px solid ${C.acc}` }}>{st.text}</div>
                     {usedIn(st).length > 0 && <div className="text-xs mt-1 px-1" style={{ color: C.mute }}>ورد ارتباطه في: {usedIn(st).join("، ")}</div>}

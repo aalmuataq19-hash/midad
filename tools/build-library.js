@@ -79,10 +79,13 @@ const read = (n) => fs.readFileSync(path.join(SRC, byName(n)), "utf8");
 
 const statutes = [];
 const report = [];
-const push = (system, ref, text, source) => {
+// المسار البنيوي (القسم > الباب > الفصل > الفرع) يحمل موضوع المادة، وهو ما يجعلها قابلة
+// للعثور بالبحث ويمنح النموذج سياقها. مثال: فصل التقادم في نظام المعاملات المدنية لا ترد
+// كلمة «التقادم» في متن أي مادة من مواده الاثنتي عشرة، بل في مسارها وحده.
+const push = (system, ref, text, source, path) => {
   const t = clean(text);
   if (!ref || !t || t.length < 12) return false;
-  statutes.push({ ref, system, text: t, version: "", effective: "", source: source || "" });
+  statutes.push({ ref, system, text: t, path: clean(path || ""), version: "", effective: "", source: source || "" });
   return true;
 };
 
@@ -104,7 +107,7 @@ for (const p of PLAN) {
       const ref = num ? `المادة (${toWestern(num)})` : (p.refFromTitle ? b.title.replace(/\s*—.*$/, "").trim() : null);
       if (!ref) { skippedNoNum++; continue; }
       const reg = p.regKey ? b.fields[p.regKey] : "";
-      push(p.system, ref, reg ? `${text}\n\n[اللائحة التنفيذية]\n${reg}` : text, src);
+      push(p.system, ref, reg ? `${text}\n\n[اللائحة التنفيذية]\n${reg}` : text, src, b.fields["مسار"] || b.fields["المسار"] || "");
     }
     if (p.kind === "md2") {
       const t2 = p.tier2;
@@ -112,7 +115,7 @@ for (const p of PLAN) {
         const num = b.fields[t2.numKey];
         const text = t2.textKeys.map((k) => b.fields[k]).find(Boolean);
         if (!num || !text) { skippedNoNum++; continue; }
-        push(t2.system, `المادة (${toWestern(num)})`, text, src);
+        push(t2.system, `المادة (${toWestern(num)})`, text, src, b.fields["مسار_اللائحة"] || "");
       }
     }
   } else if (p.kind === "headings") {
