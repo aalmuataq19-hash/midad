@@ -163,7 +163,7 @@ async function testConnection() {
 const { repairJSON, pj, createPjOrFix } = require("./src/json-repair.js");
 const FIX_SYS = "أنت مصلح JSON. تستلم نصًا يُفترض أنه JSON لكنه غير صالح، فتعيده JSON صالحًا تمامًا بنفس المحتوى والمفاتيح، بلا أي نص قبله أو بعده وبلا markdown. إن كان مقطوعًا فأغلقه بأقل تعديل ممكن دون اختراع بيانات.";
 const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000));
-function fileBlocks(files, sendRaw = false) {
+function fileBlocks(files, sendRaw = false, cache = true) {
   const out = [];
   for (const f of files) {
     // مستند بلا نص مستخرج يرفضه الـ API ويُفشل كل المراحل، فيُستبدل بسطر يوضح حاله.
@@ -176,6 +176,10 @@ function fileBlocks(files, sendRaw = false) {
     else if (f.kind === "image") { out.push({ type: "text", text: `الصورة التالية هي المستند: «${f.name}»` }); out.push({ type: "image", source: { type: "base64", media_type: f.mime, data: f.data } }); }
     else out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.data }, title: f.name });
   }
+  // نقطة تخزين مؤقت على آخر كتلة قبل نص المرحلة: تُخزَّن الملفات مرة واحدة في المرحلة الأولى
+  // ثم تُقرأ في المراحل الخمس الباقية وفي أسئلة الملف من الذاكرة بدل إعادة إرسالها كاملة.
+  // النظام والملفات ثابتة في كل الطلبات، والمتغير الوحيد هو نص المرحلة بعد هذه النقطة.
+  if (cache && out.length) out[out.length - 1] = { ...out[out.length - 1], cache_control: { type: "ephemeral" } };
   return out;
 }
 const STAGES = [

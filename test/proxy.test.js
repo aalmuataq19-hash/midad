@@ -1,0 +1,90 @@
+// يتأكد أن وسيط server.js يمرّر جسم الطلب كما هو إلى Anthropic،
+// وبخاصة cache_control الذي يعتمد عليه التخزين المؤقت للملفات.
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const ROOT = path.join(__dirname, "..");
+const PORT = 10891;
+const CAPTURE = path.join(os.tmpdir(), `midad-upstream-${process.pid}.json`);
+
+let child;
+
+test.before(async () => {
+  child = spawn(process.execPath, ["--require", path.join(__dirname, "upstream-stub.js"), "server.js"], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(PORT), ANTHROPIC_API_KEY: "sk-ant-test-not-a-real-key", ACCESS_PASSWORD: "test-password", MIDAD_CAPTURE: CAPTURE },
+    stdio: "ignore",
+  });
+  for (let i = 0; i < 60; i++) {
+    try { const r = await fetch(`http://127.0.0.1:${PORT}/api`); if (r.ok) return; } catch { }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("لم يقلع الخادم");
+});
+
+test.after(() => { if (child) child.kill(); try { fs.unlinkSync(CAPTURE); } catch { } });
+
+const post = async (body) => {
+  try { fs.unlinkSync(CAPTURE); } catch { }
+  const res = await fetch(`http://127.0.0.1:${PORT}/api`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-midad-pass": "test-password" },
+    body: JSON.stringify(body),
+  });
+  const sent = JSON.parse(fs.readFileSync(CAPTURE, "utf8"));
+  return { res, sent, upstream: JSON.parse(sent.body) };
+};
+
+const withDocs = (extra = {}) => ({
+  model: "claude-sonnet-5",
+  max_tokens: 6000,
+  temperature: 0,
+  system: "نظام مِداد",
+  messages: [{ role: "user", content: [
+    { type: "document", source: { type: "text", media_type: "text/plain", data: "صحيفة الدعوى" }, title: "صحيفة-الدعوى.docx" },
+    { type: "document", source: { type: "text", media_type: "text/plain", data: "المذكرة الجوابية" }, title: "المذكرة-الجوابية.docx", cache_control: { type: "ephemeral" } },
+    { type: "text", text: "نص المرحلة" },
+  ] }],
+  ...extra,
+});
+
+test("الوسيط يمرّر cache_control إلى Anthropic بلا حذف", async () => {
+  const { upstream } = await post(withDocs());
+  const blocks = upstream.messages[0].content;
+  assert.equal(blocks[1].cache_control.type, "ephemeral");
+  assert.equal(blocks[0].cache_control, undefined);
+  assert.equal(blocks[2].type, "text");
+});
+
+test("الوسيط لا يغيّر ترتيب الكتل ولا محتوى المستندات", async () => {
+  const { upstream } = await post(withDocs());
+  const blocks = upstream.messages[0].content;
+  assert.equal(blocks.length, 3);
+  assert.equal(blocks[0].source.data, "صحيفة الدعوى");
+  assert.equal(blocks[1].title, "المذكرة-الجوابية.docx");
+  assert.equal(upstream.system, "نظام مِداد");
+  assert.equal(upstream.temperature, 0);
+});
+
+test("cache_control على كتلة نص النظام يمر أيضًا", async () => {
+  const { upstream } = await post(withDocs({ system: [{ type: "text", text: "نظام مِداد", cache_control: { type: "ephemeral" } }] }));
+  assert.equal(upstream.system[0].cache_control.type, "ephemeral");
+});
+
+test("الوسيط ما زال يحذف stream وmetadata فقط", async () => {
+  const { upstream } = await post(withDocs({ stream: true, metadata: { user_id: "x" } }));
+  assert.equal(upstream.stream, undefined);
+  assert.equal(upstream.metadata, undefined);
+  assert.equal(upstream.messages[0].content[1].cache_control.type, "ephemeral");
+});
+
+test("الوسيط يقصّ max_tokens ولا يمس الكتل", async () => {
+  const { upstream } = await post(withDocs({ max_tokens: 999999 }));
+  assert.equal(upstream.max_tokens, 8000);
+  assert.equal(upstream.messages[0].content[1].cache_control.type, "ephemeral");
+});

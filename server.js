@@ -73,7 +73,8 @@ async function handleApi(req, res, url) {
   try { body = JSON.parse(raw); } catch { return fail(res, 400, "midad_request", "صيغة الطلب غير صحيحة."); }
   if (!body || typeof body !== "object" || !Array.isArray(body.messages)) return fail(res, 400, "midad_request", "الطلب يفتقد messages.");
   if (!ALLOWED.includes(body.model)) body.model = ALLOWED[0];
-  body.max_tokens = Math.min(num(body.max_tokens, 4000, 256, 200000), MAX_TOKENS);
+  // قيمة خارج المدى تُقصّ إلى السقف، وقيمة غير رقمية ترجع إلى الافتراضي.
+  body.max_tokens = Math.min(Math.max(num(body.max_tokens, 4000, 1, 1e9), 256), MAX_TOKENS);
   delete body.stream; delete body.metadata;
 
   const ctrl = new AbortController();
