@@ -312,7 +312,9 @@ function fileBlocks(files, sendRaw = false, cache = true, pid = null) {
         else if (Array.isArray(f.shots) && f.shots.length) {
           out.push({ type: "text", text: `الصور التالية صفحات المستند: «${f.name}»` });
           for (const b64 of f.shots) out.push({ type: "image", source: { type: "base64", media_type: "image/png", data: b64 } });
-        } else out.push({ type: "image", source: { type: "base64", media_type: "application/pdf", data: f.data } });  // حارس unsupported يوقفه برسالة
+        }
+        // لا نص ولا صور: كتلة معطوبة كانت تُرسل فيرفضها المزوّد برسالة غامضة
+        else out.push({ type: "text", text: `المستند «${f.name}» ملف PDF مصوّر بلا نص، و${P.label} لا يقرأ ملفات PDF ولا أمكن تحويل صفحاته إلى صور. لا تستخرج منه شيئًا، واذكر في gaps أنه لم يُقرأ.` });
         continue;
       }
       if (!sendRaw && hasText) out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.text }, title: f.name });
@@ -435,7 +437,10 @@ async function readFile(file) {
   if (ext) return { id: uid(), name, kind: "image", mime: IMG_MIME[ext] || "image/jpeg", data: await toB64(file), size: file.size };
   if (lower.endsWith(".docx")) { if (!window.mammoth) throw new Error("مكتبة قراءة Word لم تُحمَّل. تأكد من الاتصال بالإنترنت وأعد تحميل الصفحة."); const ab = await file.arrayBuffer(); const r = await window.mammoth.extractRawText({ arrayBuffer: ab }); if (!String(r.value || "").trim()) throw new Error(`الملف «${name}» لم يُستخرج منه نص. إن كان صورًا داخل Word فاحفظه PDF أو ارفع الصور نفسها.`); return { id: uid(), name, kind: "text", mime: "text/plain", data: r.value, size: file.size }; }
   if (lower.endsWith(".txt") || lower.endsWith(".md")) { const t = await file.text(); if (!t.trim()) throw new Error(`الملف «${name}» فارغ.`); return { id: uid(), name, kind: "text", mime: "text/plain", data: t, size: file.size }; }
-  throw new Error(`صيغة غير مدعومة: «${name}». المدعوم: PDF، Word (docx)، صور، نص.`);
+  // HEIC صيغة الصور الافتراضية في الآيفون، ولا يقرأها أي متصفح، فالرسالة تحلّها لا تصفها
+  if (/\.(heic|heif)$/.test(lower)) throw new Error(`الملف «${name}» بصيغة HEIC، وهي صيغة صور الآيفون ولا تقرأها المتصفحات. من الآيفون: افتح الصورة في «الصور» ← زر المشاركة ← «نسخ الصورة» ثم الصقها في ملاحظة واحفظها JPG، أو غيّر الإعداد من: الإعدادات ← الكاميرا ← الصيغ ← «الأكثر توافقًا».`);
+  if (/\.(doc|rtf|pages)$/.test(lower)) throw new Error(`الملف «${name}» بصيغة قديمة لا تُقرأ هنا. افتحه واحفظه بصيغة Word الحديثة (docx) أو PDF ثم ارفعه.`);
+  throw new Error(`صيغة غير مدعومة: «${name}». المدعوم: PDF، Word (docx)، صور (jpg وpng)، نص.`);
 }
 const fmtSize = (b) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} م.ب` : `${Math.round(b / 1024)} ك.ب`;
 
@@ -486,7 +491,7 @@ const Modal = ({ title, onClose, children, wide }) => (
     <div className={`w-full ${wide ? "max-w-5xl" : "max-w-2xl"} rounded-2xl overflow-hidden flex flex-col`} style={{ background: C.bg, maxHeight: "88vh" }} onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: `1px solid ${C.line}` }}>
         <h3 className="font-bold text-lg">{title}</h3>
-        <button onClick={onClose} className="p-1 rounded-md" style={{ color: C.mute }}><X size={18} /></button>
+        <button onClick={onClose} aria-label="إغلاق" className="p-1 rounded-md" style={{ color: C.mute }}><X size={18} /></button>
       </div>
       <div className="p-5 overflow-y-auto">{children}</div>
     </div>
@@ -548,7 +553,12 @@ function SettingsScreen({ onClose, first }) {
         <>
           <p className="text-sm leading-7 mb-4" style={{ color: C.mute }}>هذا الموقع مجهّز بخادم يحمل مفتاح API. تدخل بكلمة مرور الموقع، أو تستخدم مفتاحك الشخصي إن أردت.</p>
           <div className="flex gap-1 mb-6 rounded-lg p-1 w-fit" style={{ background: C.grey }}>
-            {[["proxy", "كلمة مرور الموقع"], ["direct", "مفتاح API شخصي"]].map(([k, l]) => <button key={k} onClick={() => { setMode(k); setTest(null); }} className="px-4 py-1.5 rounded-md text-sm" style={{ background: mode === k ? C.card : "transparent", fontWeight: mode === k ? 600 : 400 }}>{l}</button>)}
+            {[["proxy", "كلمة مرور الموقع"], ["direct", "مفتاح API شخصي"]].map(([k, l]) => <button key={k} onClick={() => {
+              setMode(k); setTest(null);
+              // خادم الموقع يتكلم مع كلود وحده، فاسم نموذج مزوّد آخر لا معنى له هنا
+              const to = k === "proxy" ? "anthropic" : prov;
+              if (!PROVIDERS[to].defaultModels.includes(model)) setModel(PROVIDERS[to].defaultModels[0]);
+            }} className="px-4 py-1.5 rounded-md text-sm" style={{ background: mode === k ? C.card : "transparent", fontWeight: mode === k ? 600 : 400 }}>{l}</button>)}
           </div>
         </>
       ) : (
@@ -757,7 +767,7 @@ function Home({ cases, onNew, onOpen, onSettings, onImport, setToast }) {
   };
   return (
     <div className="max-w-5xl mx-auto px-6 pt-20 pb-24 fade relative">
-      <button onClick={onSettings} title="الإعدادات" className="absolute top-6 left-6 p-2 rounded-lg" style={{ color: C.mute, border: `1px solid ${C.line}` }}><Settings size={16} /></button>
+      <button onClick={onSettings} title="الإعدادات" aria-label="الإعدادات" className="absolute top-6 left-6 p-2 rounded-lg" style={{ color: C.mute, border: `1px solid ${C.line}` }}><Settings size={16} /></button>
       <div className="text-center mb-12">
         <div className="font-bold" style={{ fontSize: 64, lineHeight: 1, letterSpacing: "-0.01em" }}>مِداد</div>
         <div className="text-lg mt-3 font-medium">مساحة العمل القضائية الذكية</div>
@@ -919,7 +929,10 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
   const set = (k) => (v) => setF((s) => ({ ...s, [k]: v }));
   const addFiles = async (list) => {
     setErr("");
-    for (const file of Array.from(list)) { try { const r = await readFile(file); setFiles((fs) => [...fs, r]); } catch (e) { setErr(e.message); } }
+    const bad = [];
+    for (const file of Array.from(list)) { try { const r = await readFile(file); setFiles((fs) => [...fs, r]); } catch (e) { bad.push(e.message); } }
+    // كان يُعرض آخر خطأ وحده، فيختفي سبب رفض بقية الملفات
+    if (bad.length) setErr(bad.join("\n"));
   };
   const impRef = useRef();
   const [paste, setPaste] = useState(null);
@@ -1024,7 +1037,7 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
             {files.map((fl) => (
               <li key={fl.id} className="flex items-center justify-between rounded-lg px-3 py-2 text-sm" style={{ background: C.card, border: `1px solid ${C.line}` }}>
                 <span className="flex items-center gap-2 truncate"><FileText size={15} style={{ color: C.mute }} /> {fl.name} <span className="text-xs" style={{ color: C.mute }}>{fmtSize(fl.size)}</span></span>
-                <button onClick={() => setFiles((fs) => fs.filter((x) => x.id !== fl.id))} style={{ color: C.mute }}><X size={15} /></button>
+                <button onClick={() => setFiles((fs) => fs.filter((x) => x.id !== fl.id))} aria-label={`أزل ${fl.name}`} style={{ color: C.mute }}><X size={15} /></button>
               </li>
             ))}
           </ul>
@@ -1043,7 +1056,7 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
             </label>
           </>
         )}
-        {err && <div className="text-sm rounded-lg p-3" style={{ background: C.copperSoft, color: C.copper }}>{err}</div>}
+        {err && <div className="text-sm rounded-lg p-3 whitespace-pre-line leading-7" style={{ background: C.copperSoft, color: C.copper }}>{err}</div>}
         <div className="flex flex-wrap items-center gap-3 text-xs">
           <button onClick={runTest} className="underline decoration-dotted" style={{ color: C.acc }}>اختبر الاتصال بالنموذج</button>
           {conn?.busy && <span className="inline-flex items-center gap-1" style={{ color: C.mute }}><Loader2 size={12} className="animate-spin" /> يختبر…</span>}
@@ -1222,9 +1235,9 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
           <Btn kind="ghost" small onClick={() => setPanel("gaps")}><Eye size={14} /> ما الذي يحتاج إلى تحقق؟ {nGaps ? <span className="text-xs" style={{ color: C.amber }}>{arNum(nGaps)}</span> : null}</Btn>
           <Btn kind="ghost" small onClick={() => setPanel("new")}><History size={14} /> ما الجديد؟</Btn>
           <div className="md:hidden flex gap-1 mr-auto">
-            <button onClick={() => addInp.current.click()} title="أضف ملفات" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Upload size={15} /></button>
-            <button onClick={() => impInp.current && impInp.current.click()} title="استيراد تحليل" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Download size={15} /></button>
-            <button onClick={() => setConfirmDel(true)} className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}`, color: C.copper }}><Trash2 size={15} /></button>
+            <button onClick={() => addInp.current.click()} title="أضف ملفات" aria-label="أضف ملفات إلى القضية" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Upload size={15} /></button>
+            <button onClick={() => impInp.current && impInp.current.click()} title="استيراد تحليل" aria-label="استيراد تحليل" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}` }}><Download size={15} /></button>
+            <button onClick={() => setConfirmDel(true)} aria-label="احذف القضية نهائيًا" className="p-2 rounded-lg" style={{ border: `1px solid ${C.line}`, color: C.copper }}><Trash2 size={15} /></button>
           </div>
         </div>
         <div className="md:hidden flex gap-1 overflow-x-auto px-4 py-2" style={{ borderBottom: `1px solid ${C.line}` }}>
@@ -1615,7 +1628,7 @@ function Issues({ a, c, update, openSrc, library, setNote, setToast }) {
             </div>
             {(c.linked?.[i] || []).map((pid) => { const p = library.principles.find((x) => x.id === pid); return p ? (
               <div key={pid} className="mt-2 rounded-lg p-3 text-sm" style={{ background: C.note, border: `1px solid ${C.line}` }}>
-                <div className="flex items-center justify-between"><span className="text-xs" style={{ color: C.acc }}>مبدأ ربطه القاضي</span><button onClick={() => unlink(i, pid)} style={{ color: C.mute }}><X size={14} /></button></div>
+                <div className="flex items-center justify-between"><span className="text-xs" style={{ color: C.acc }}>مبدأ ربطه القاضي</span><button onClick={() => unlink(i, pid)} aria-label="أزل ربط المبدأ" style={{ color: C.mute }}><X size={14} /></button></div>
                 <div className="font-medium mt-1">{p.title}</div><div className="text-xs mt-1 leading-6" style={{ color: C.mute }}>{p.source}</div>
               </div>) : null; })}
           </div>
@@ -1798,7 +1811,7 @@ function StatutesTab({ c, update, library, setLibrary, a, reanalyze, setToast })
                       </span>
                     </span>
                   </label>
-                  <button onClick={() => setConfirmDel(system)} title="احذف هذا النظام من مكتبتك" style={{ color: C.mute }}><Trash2 size={15} /></button>
+                  <button onClick={() => setConfirmDel(system)} title="احذف هذا النظام من مكتبتك" aria-label={`احذف ${system} من مكتبتك`} style={{ color: C.mute }}><Trash2 size={15} /></button>
                 </div>
                 <div className="flex items-center gap-3 mt-3 text-xs">
                   <button onClick={() => setOpen((o) => ({ ...o, [system]: !o[system] }))} className="underline decoration-dotted" style={{ color: C.acc }}>
@@ -1921,7 +1934,7 @@ function Notes({ c, update, setSession }) {
         <div key={n.id} className="flex items-start gap-3 rounded-lg px-4 py-3 mb-2 text-sm" style={{ background: C.card, border: `1px solid ${C.line}` }}>
           {n.task ? <button onClick={() => setN((ns) => ns.map((x) => x.id === n.id ? { ...x, done: !x.done } : x))} className="mt-0.5" style={{ color: n.done ? C.acc : C.mute }}>{n.done ? <CheckCircle2 size={18} /> : <Circle size={18} />}</button> : <StickyNote size={16} className="mt-1" style={{ color: C.mute }} />}
           <span className="flex-1 leading-7" style={{ textDecoration: n.done ? "line-through" : "none", color: n.done ? C.mute : C.ink }}>{n.text}</span>
-          <button onClick={() => setN((ns) => ns.filter((x) => x.id !== n.id))} style={{ color: C.mute }}><X size={15} /></button>
+          <button onClick={() => setN((ns) => ns.filter((x) => x.id !== n.id))} aria-label="احذف الملاحظة" style={{ color: C.mute }}><X size={15} /></button>
         </div>
       ))}
     </div>
@@ -2129,6 +2142,7 @@ function AskBar({ c, loadFiles, update, openSrc }) {
     update((x) => ({ ...x, chat: [...(x.chat || []), { role: "q", text: question, literal }] }));
     try {
       const files = await loadFiles(c);
+      await prepareForProvider(files, API.mode === "proxy" ? "anthropic" : getProvider());
       const prompt = literal
         ? `السؤال: ${question}\nوضع "الحرفي فقط" مفعّل: لا تلخّص ولا تعد الصياغة ولا تستنتج. أعد فقط المقاطع الأصلية ذات الصلة كما هي حرفيًا، كل مقطع مع مصدره. إن لم تجد شيئًا، اجعل notFound صحيحًا.
 أعد JSON بهذا الشكل بالضبط: {"answer":"","items":[{"text":"المقطع حرفيًا","src":{"doc":"","page":0,"quote":""}}],"notFound":false}`
@@ -2150,7 +2164,7 @@ function AskBar({ c, loadFiles, update, openSrc }) {
             <div className="text-sm font-semibold">اسأل ملف القضية</div>
             <div className="flex items-center gap-3">
               {chat.length > 0 && <button onClick={() => update((x) => ({ ...x, chat: [] }))} className="text-xs" style={{ color: C.mute }}>امسح</button>}
-              <button onClick={() => setOpen(false)} style={{ color: C.mute }}><X size={16} /></button>
+              <button onClick={() => setOpen(false)} aria-label="أغلق لوحة السؤال" style={{ color: C.mute }}><X size={16} /></button>
             </div>
           </div>
           {blocked && <div className="rounded-lg p-3 mb-4 text-sm leading-7" style={{ background: C.amberSoft, color: C.amber }}>{blocked}</div>}
@@ -2181,7 +2195,7 @@ function AskBar({ c, loadFiles, update, openSrc }) {
           <input value={q} onFocus={() => setOpen(true)} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={blocked ? "السؤال غير متاح — اضغط لمعرفة السبب" : "اسأل عن هذه القضية…"} className="flex-1 bg-transparent outline-none py-2.5 text-sm" />
           <button onClick={() => setLiteral(!literal)} className="text-xs px-2 py-1 rounded-md whitespace-nowrap" style={{ background: literal ? C.acc : C.grey, color: literal ? "#fff" : C.mute }} title="اعرض المقاطع الأصلية فقط دون تلخيص">الحرفي فقط</button>
         </div>
-        <button onClick={() => send()} disabled={busy} className="p-2.5 rounded-xl disabled:opacity-50" style={{ background: C.acc, color: "#fff" }}><Send size={16} style={{ transform: "rotate(180deg)" }} /></button>
+        <button onClick={() => send()} disabled={busy} aria-label="أرسل السؤال" className="p-2.5 rounded-xl disabled:opacity-50" style={{ background: C.acc, color: "#fff" }}><Send size={16} style={{ transform: "rotate(180deg)" }} /></button>
       </div>
     </div>
   );
@@ -2241,7 +2255,7 @@ function Viewer({ c, srcs, loadFiles, onClose, onAddPair }) {
         <div className="text-sm font-semibold flex items-center gap-2"><FileText size={15} /> عارض المستندات</div>
         <div className="flex items-center gap-2">
           {!two && <button onClick={onAddPair} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-md" style={{ background: C.grey }}><Columns size={13} /> افتح مصدرًا آخر بجانبه</button>}
-          <button onClick={onClose} style={{ color: C.mute }}><X size={18} /></button>
+          <button onClick={onClose} aria-label="أغلق عارض المستندات" style={{ color: C.mute }}><X size={18} /></button>
         </div>
       </div>
       <div className={`flex-1 min-h-0 grid ${two ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"}`}>
