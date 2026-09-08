@@ -171,6 +171,28 @@ midad/
 
 ---
 
+## 4.١ المزودون (Providers)
+
+مِداد يقبل مفاتيح Anthropic وOpenAI وGoogle Gemini وDeepSeek وOpenRouter وأي واجهة متوافقة مع OpenAI.
+
+**البنية.** `src/providers.js` هو المصدر الوحيد، يقرأ منه التطبيق (يدمجه esbuild في app.js) والخادم (`require` مباشر)، فلا يفترقان. فيه جدول `PROVIDERS` وواجهتان موحّدتان: `buildRequest(providerId, {system, content, maxTokens, model})` و`parseResponse(providerId, json)`. والمحوّلات اثنتان لا غير:
+
+- `anthropic` — صيغة Messages API كما هي، بلا تغيير عمّا كان.
+- `openai_compat` — صيغة `/chat/completions`: النظام رسالة `role=system`، والمستندات النصية نصٌّ معنون في رسالة `user`، والصور `image_url` كـ data URL. تغطي OpenAI وDeepSeek وOpenRouter وGemini عبر نقطته المتوافقة `v1beta/openai`.
+
+**المسار.** Anthropic وحدها تُنادى من المتصفح مباشرة (`direct: true`)، لأنها الوحيدة التي تسمح بذلك بترويسة `anthropic-dangerous-direct-browser-access`. وما عداها يمرّ عبر `server.js`: يرسل المتصفح `x-midad-provider` و`x-midad-key`، والخادم يمرّر إلى `baseUrl` المزوّد **من الجدول نفسه لا من الترويسة** — وهذه هي القائمة البيضاء التي تُغلق باب SSRF. والمفتاح يُستعمل في ذلك الطلب وحده: لا يُخزَّن، ولا يُسجَّل، ويُنقّى بـ `scrub()` من كل نصّ خطأ قبل عرضه. ووضع «كلمة مرور الموقع» باقٍ كما هو: Anthropic بمفتاح الخادم.
+
+**الملفات.** نص PDF يُستخرج في المتصفح بعلامات `[صفحة N]`، وهو ما يُرسل لكل المزوّدين. وPDF مصوّر بلا نص: يذهب كما هو إلى Anthropic، وتُرسَّم صفحاته صورًا (`pdfShots`، حتى ١٢ صفحة) لمن يقرأ الصور ولا يقرأ PDF، ويُرفض برسالة واضحة **قبل** التحليل عند من لا يقرأ الصور أصلًا.
+
+**الحراسة قبل الإرسال.** `keyMismatch` (مفتاح لا يوافق مزوّده)، و`unsupported` (ملف مصوّر عند من لا يقرأه)، و`tooBig` (تقدير الحجم = الأحرف ÷ ٣، مقارنًا بـ `contextTokens`). والأخطاء تُوحَّد بـ `classify()` إلى: auth / credit / size / model / rate / busy / server، فتخرج بالرسائل العربية نفسها مهما اختلف المزوّد.
+
+**النماذج.** حقل النموذج نصٌّ حرّ لا قائمة مغلقة، لأن أسماء النماذج تتغيّر. `defaultModels` اقتراحات فقط، وزر «اجلب النماذج المتاحة في حسابي» يقرأ `GET /models` من المزوّد بمفتاح صاحبه، وهذا أدقّ من أي قائمة مكتوبة هنا.
+
+**إضافة مزوّد جديد — ثلاثة أسطر:**
+1. أضف سطره في `PROVIDERS` داخل `src/providers.js`: `{id, label, adapter:"openai_compat", baseUrl, path:"/chat/completions", supportsImages, supportsPdfNative:false, contextTokens, keyRe, keyHint, console, defaultModels}`.
+2. أضف `id` إلى `PROVIDER_LIST` (ومنه تُشتقّ القائمة البيضاء وقائمة الإعدادات تلقائيًا).
+3. أضف حالته في `test/providers.test.js` و`test/relay.test.js`، ثم `npm run build`.
+
 ## 5. تاريخ القرارات المهمة (لماذا الأشياء كما هي)
 
 1. بدأ المشروع كوثيقة مواصفات، ثم حُوّل إلى تطبيق React داخل Claude Artifacts. فشل الاتصال بالنموذج من داخل تطبيق الجوال (خيار "AI-powered artifacts" غير متاح هناك)، فتُركت هذه النسخة.

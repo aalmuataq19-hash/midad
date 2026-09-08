@@ -48,6 +48,7 @@ const SECTIONS = [
   ["notes", "ملاحظاتي", StickyNote], ["memo", "مذكرة الدراسة", ScrollText],
 ];
 const { CASE_TYPES, NOT_FOUND, SYS, STAGES, lastPart, stagePrompt } = require("./src/prompts.js");
+const { PROVIDERS, PROVIDER_LIST, buildRequest, parseResponse, readError, classify, scrub, detectProvider, keyMismatch, unsupported, estimateTokens, tooBig } = require("./src/providers.js");
 const ORD = ["الأولى", "الثانية", "الثالثة", "الرابعة", "الخامسة", "السادسة", "السابعة", "الثامنة"];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -78,8 +79,8 @@ async function detectProxy() {
   API.available = false; API.mode = "direct"; return false;
 }
 const isReady = () => API.mode === "proxy" ? !!getPass() : !!getKey();
-const getModel = () => ls.get("midad:model") || "claude-sonnet-5";
-const MODEL_OPTIONS = [["claude-sonnet-5", "Sonnet 5 — متوازن (المقترح)"], ["claude-opus-5", "Opus 5 — أدق وأغلى"], ["claude-fable-5-1", "Fable 5.1 — الأقوى والأغلى"], ["claude-haiku-4-5-20251001", "Haiku 4.5 — الأسرع والأرخص"]];
+const getProvider = () => { const v = ls.get("midad:provider"); return PROVIDER_LIST.includes(v) ? v : "anthropic"; };
+const getModel = () => ls.get("midad:model").trim() || PROVIDERS[getProvider()].defaultModels[0];
 
 /* ───────────────────────── التاريخ الهجري والميلادي ───────────────────────── */
 function dual(iso, fallback) {
@@ -95,21 +96,26 @@ function dual(iso, fallback) {
 
 /* ───────────────────────── الاتصال بالنموذج ───────────────────────── */
 
-const FALLBACKS = ["claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/* مِداد يخاطب Anthropic وحدها. مفتاح مزوّد آخر يُرفض هنا لا بعد رحلة إلى الخادم،
-   فالرسالة تكون في مكانها وقتها، ولا يذهب المفتاح إلى جهة لا يخصّها. */
-const ANT_KEY = /^sk-ant-/;
-const NOT_ANTHROPIC = "هذا المفتاح ليس من Anthropic. مِداد يعمل بمفاتيح Anthropic وحدها، وهي تبدأ بـ sk-ant-. مفاتيح ChatGPT وGemini وغيرها لا تعمل هنا. احصل على مفتاح من console.anthropic.com ← Get API key.";
 const REQ_TIMEOUT = 300000;   // خمس دقائق: أطول من أي طلب حقيقي، وتمنع انتظارًا بلا نهاية
+/* خادم الموقع يحمل مفتاح Anthropic وحده، فوضع «كلمة مرور الموقع» يبقى عليها.
+   والمفتاح الشخصي يذهب من المتصفح مباشرة إلى المزوّد الذي اختاره صاحبه. */
 async function llm(system, content, maxTokens = 4000) {
   const proxy = API.mode === "proxy";
   const key = getKey(), pass = getPass();
+  const pid = proxy ? "anthropic" : getProvider();
+  const P = PROVIDERS[pid] || PROVIDERS.anthropic;
   if (proxy && !pass) throw new Error("لم تُدخل كلمة مرور الدخول بعد. افتح الإعدادات (رمز الترس في الصفحة الرئيسية).");
   if (!proxy && !key) throw new Error("لم يُدخل مفتاح API بعد. افتح الإعدادات (رمز الترس في الصفحة الرئيسية) وأدخله.");
-  if (!proxy && !ANT_KEY.test(key)) throw Object.assign(new Error(NOT_ANTHROPIC), { final: true });
+  if (!proxy) {
+    for (const bad of [keyMismatch(pid, key), unsupported(pid, content), tooBig(pid, system, content, maxTokens)]) {
+      if (bad) throw Object.assign(new Error(bad), { final: true });
+    }
+  }
+  // مزوّد غير Anthropic يمرّ عبر خادم الموقع: أغلبهم يمنع النداء من صفحة ويب.
+  const viaServer = proxy || !P.direct;
   const pref = getModel();
-  const models = [pref, ...FALLBACKS.filter((m) => m !== pref)];
+  const models = [pref, ...(P.fallbacks || []).filter((m) => m !== pref)];
   let lastErr = null, retried = false;
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
@@ -118,43 +124,70 @@ async function llm(system, content, maxTokens = 4000) {
       const timer = ctl ? setTimeout(() => ctl.abort(), REQ_TIMEOUT) : null;
       let res;
       try {
-        res = await fetch(proxy ? API.proxy : "https://api.anthropic.com/v1/messages", {
+        res = await fetch(viaServer ? API.proxy : P.baseUrl + P.path, {
           method: "POST",
           signal: ctl ? ctl.signal : undefined,
-          headers: proxy
-            ? { "Content-Type": "application/json", "x-midad-pass": pass }
-            : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-          // لا تُرسل temperature: ألغتها النماذج الحديثة (Sonnet 5 وOpus 5 وFable 5.1) وترد
-          // «temperature is deprecated for this model» وتفشل الطلب. النماذج الأقدم تقبل غيابها.
-          body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
+          headers: proxy ? { "Content-Type": "application/json", "x-midad-pass": pass }
+            : viaServer ? { "Content-Type": "application/json", "x-midad-provider": pid, "x-midad-key": key }
+              : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+          body: JSON.stringify(buildRequest(proxy ? "anthropic" : pid, { model, system, content, maxTokens })),
         });
       } catch (e) {
         if (e && e.name === "AbortError") throw Object.assign(new Error("لم يردّ النموذج خلال خمس دقائق. أعد المحاولة، وإن تكرر فقلّل عدد المستندات أو حجمها."), { final: true });
         throw e;
       } finally { if (timer) clearTimeout(timer); }
       const raw = await res.text();
-      let data; try { data = JSON.parse(raw); } catch { throw Object.assign(new Error(`استجابة غير مفهومة (${res.status}): ${raw.slice(0, 120)}`), { final: true }); }
-      if (data.error || data.type === "error") {
-        const er = data.error || {}; const type = er.type || ""; const msg = er.message || JSON.stringify(er);
-        if (type === "midad_auth") throw Object.assign(new Error("كلمة مرور الدخول غير صحيحة."), { final: true });
-        if (type === "midad_config") throw Object.assign(new Error(`إعداد الخادم غير مكتمل: ${msg}`), { final: true });
-        if (type === "midad_rate") throw Object.assign(new Error("طلبات كثيرة في وقت قصير. انتظر دقيقة ثم أعد المحاولة."), { final: true });
-        if (type === "midad_upstream") throw Object.assign(new Error(msg), { final: true });
-        if (type === "authentication_error") throw Object.assign(new Error(proxy ? "مفتاح API المضبوط في الخادم غير صحيح. راجع متغير ANTHROPIC_API_KEY في إعدادات الخادم." : "المفتاح غير صحيح أو غير مفعّل. تأكد من نسخه كاملًا من console.anthropic.com."), { final: true });
-        if (type === "permission_error") throw Object.assign(new Error(`ليس للمفتاح صلاحية: ${msg}`), { final: true });
-        if (type === "not_found_error" && /model/i.test(msg)) { lastErr = new Error(`النموذج ${model} غير متاح لحسابك.`); continue; }
-        if (type === "invalid_request_error" && /credit|billing|balance/i.test(msg)) throw Object.assign(new Error("الرصيد غير كافٍ. أضف رصيدًا من Add funds في console.anthropic.com ثم أعد المحاولة."), { final: true });
-        if ((type === "rate_limit_error" || type === "overloaded_error" || type === "api_error") && !retried) { retried = true; await sleep(2500); mi--; continue; }
-        throw Object.assign(new Error(`${msg} (${type || res.status})`), { final: true });
+      let data; try { data = JSON.parse(raw); } catch { throw Object.assign(new Error(`استجابة غير مفهومة (${res.status}): ${scrub(raw, key).slice(0, 120)}`), { final: true }); }
+      // أخطاء خادم الموقع تخصّ مِداد نفسه، فتُقرأ قبل أخطاء المزوّد
+      const mid = data.error && String(data.error.type || "").startsWith("midad_") ? data.error : null;
+      if (mid) {
+        const msg = scrub(mid.message || "", key);
+        if (mid.type === "midad_auth" && proxy) throw Object.assign(new Error("كلمة مرور الدخول غير صحيحة."), { final: true });
+        if (mid.type === "midad_config") throw Object.assign(new Error(`إعداد الخادم غير مكتمل: ${msg}`), { final: true });
+        if (mid.type === "midad_rate") throw Object.assign(new Error("طلبات كثيرة في وقت قصير. انتظر دقيقة ثم أعد المحاولة."), { final: true });
+        throw Object.assign(new Error(msg || "خطأ في خادم الموقع."), { final: true });
       }
-      return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const er = readError(proxy ? "anthropic" : pid, data) || (res.ok ? null : { type: String(res.status), message: scrub(raw, key).slice(0, 160) });
+      if (er) {
+        er.message = scrub(er.message, key);
+        const kind = classify(res.status, er);
+        if (kind === "auth") throw Object.assign(new Error(proxy
+          ? "مفتاح API المضبوط في الخادم غير صحيح. راجع متغير ANTHROPIC_API_KEY في إعدادات الخادم."
+          : `المفتاح غير صحيح أو غير مفعّل عند ${P.label}. تأكد من نسخه كاملًا من ${P.console}.`), { final: true });
+        if (kind === "credit") throw Object.assign(new Error(`الرصيد غير كافٍ في حسابك عند ${P.label}. أضف رصيدًا ثم أعد المحاولة.`), { final: true });
+        if (kind === "size") throw Object.assign(new Error(`الطلب أكبر مما يقبله ${P.label}. قلّل عدد المستندات أو حجمها، أو اختر مزوّدًا أوسع سياقًا.`), { final: true });
+        if (kind === "model") { lastErr = new Error(`النموذج «${model}» غير متاح لحسابك عند ${P.label}. اكتب اسمه كما هو في لوحة حسابك.`); continue; }
+        if ((kind === "rate" || kind === "busy" || kind === "server") && !retried) { retried = true; await sleep(2500); mi--; continue; }
+        throw Object.assign(new Error(`${er.message} (${er.type || res.status})`), { final: true });
+      }
+      const out = parseResponse(proxy ? "anthropic" : pid, data);
+      if (!String(out || "").trim()) throw Object.assign(new Error(`ردّ ${P.label} بلا نص. جرّب نموذجًا آخر أو أعد المحاولة.`), { final: true });
+      return out;
     } catch (e) {
       if (e.final) throw e;
       lastErr = e;
-      if (/Failed to fetch|NetworkError|Load failed/i.test(e.message || "")) throw new Error(proxy ? "تعذر الوصول إلى خادم الموقع. أعد تحميل الصفحة، وإن استمر فتأكد أن الخدمة تعمل." : "تعذر الوصول إلى api.anthropic.com. تأكد من الاتصال بالإنترنت، وأن الصفحة مفتوحة في متصفح حديث (Chrome أو Edge أو Safari).");
+      if (/Failed to fetch|NetworkError|Load failed/i.test(e.message || "")) throw new Error(viaServer
+        ? "تعذر الوصول إلى خادم الموقع. أعد تحميل الصفحة، وإن استمر فتأكد أن الخدمة تعمل."
+        : "تعذر الوصول إلى api.anthropic.com. تأكد من الاتصال بالإنترنت، وأن الصفحة مفتوحة في متصفح حديث.");
     }
   }
   throw lastErr || new Error("تعذر الاتصال بالنموذج");
+}
+/* قائمة النماذج من المزوّد نفسه: أدقّ من أي قائمة أكتبها هنا، لأنها من حسابه لحظتها. */
+async function fetchModels() {
+  const pid = getProvider(), P = PROVIDERS[pid], key = getKey();
+  if (!key) throw new Error("أدخل المفتاح أولًا.");
+  const bad = keyMismatch(pid, key);
+  if (bad) throw new Error(bad);
+  if (P.direct) return P.defaultModels;
+  const res = await fetch(API.proxy, { method: "POST", headers: { "x-midad-provider": pid, "x-midad-key": key, "x-midad-kind": "models" } });
+  const raw = await res.text();
+  let d; try { d = JSON.parse(raw); } catch { throw new Error("لم تُفهم قائمة النماذج من المزوّد."); }
+  const er = d.error ? scrub(d.error.message || "", key) : (res.ok ? null : `تعذر جلب القائمة (${res.status}).`);
+  if (er) throw new Error(er);
+  const ids = (d.data || d.models || []).map((m) => m.id || m.name).filter(Boolean).map((x) => String(x).replace(/^models\//, ""));
+  if (!ids.length) throw new Error("لم يرجع المزوّد أي نموذج.");
+  return ids.sort();
 }
 async function testConnection() {
   const t0 = Date.now();
@@ -225,14 +258,26 @@ async function readImport(file) {
   if (!file.size) throw new Error(`الملف «${file.name}» فارغ.`);
   return await file.text();
 }
-function fileBlocks(files, sendRaw = false, cache = true) {
+function fileBlocks(files, sendRaw = false, cache = true, pid = null) {
+  const P = PROVIDERS[pid || (API.mode === "proxy" ? "anthropic" : getProvider())] || PROVIDERS.anthropic;
   const out = [];
   for (const f of files) {
     // مستند بلا نص مستخرج يرفضه الـ API ويُفشل كل المراحل، فيُستبدل بسطر يوضح حاله.
     if (f.kind === "text" && !String(f.data || "").trim()) { out.push({ type: "text", text: `المستند «${f.name}» مرفوع لكن لم يُستخرج منه نص (قد يكون صورًا داخل ملف Word). لا تستخرج منه شيئًا.` }); continue; }
     if (f.kind === "pdf" && !f.data && !String(f.text || "").trim()) { out.push({ type: "text", text: `المستند «${f.name}» تعذرت قراءته.` }); continue; }
     if (f.kind === "pdf") {
-      if (!sendRaw && f.text && f.text.length > 300) out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.text }, title: f.name });
+      // النص المستخرج فيه علامات [صفحة N]، فهو أدق في الإحالة وأخفّ من الملف نفسه.
+      // ومن لا يقبل PDF أصلًا لا يُرسل إليه إلا النص، أو صفحاته صورًا إن رُسّمت.
+      const hasText = f.text && f.text.length > 300;
+      if (!P.supportsPdfNative) {
+        if (hasText) out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.text }, title: f.name });
+        else if (Array.isArray(f.shots) && f.shots.length) {
+          out.push({ type: "text", text: `الصور التالية صفحات المستند: «${f.name}»` });
+          for (const b64 of f.shots) out.push({ type: "image", source: { type: "base64", media_type: "image/png", data: b64 } });
+        } else out.push({ type: "image", source: { type: "base64", media_type: "application/pdf", data: f.data } });  // حارس unsupported يوقفه برسالة
+        continue;
+      }
+      if (!sendRaw && hasText) out.push({ type: "document", source: { type: "text", media_type: "text/plain", data: f.text }, title: f.name });
       else out.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: f.data }, title: f.name });
     }
     else if (f.kind === "image") { out.push({ type: "text", text: `الصورة التالية هي المستند: «${f.name}»` }); out.push({ type: "image", source: { type: "base64", media_type: f.mime, data: f.data } }); }
@@ -283,6 +328,36 @@ function loadPdfJs() {
     document.head.appendChild(sc);
   });
   return pdfjsP;
+}
+/* PDF مصوّر بلا نص عند مزوّد لا يقبل PDF: تُرسَّم صفحاته صورًا ليقرأها.
+   لا يُفعل هذا مع كلود لأنه يقرأ الملف نفسه، ولا مع من لا يقرأ الصور. */
+const MAX_SHOTS = 12;
+async function pdfShots(b64) {
+  const pdfjs = await loadPdfJs();
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const doc = await pdfjs.getDocument({ data: buf }).promise;
+  const shots = [];
+  for (let n = 1; n <= Math.min(doc.numPages, MAX_SHOTS); n++) {
+    const page = await doc.getPage(n);
+    const vp = page.getViewport({ scale: 1.6 });
+    const cv = document.createElement("canvas");
+    cv.width = Math.min(1600, Math.round(vp.width)); cv.height = Math.round(vp.height * (cv.width / vp.width));
+    await page.render({ canvasContext: cv.getContext("2d"), viewport: page.getViewport({ scale: 1.6 * (cv.width / vp.width) }) }).promise;
+    shots.push(cv.toDataURL("image/png").split(",")[1]);
+  }
+  return shots;
+}
+/* تُستدعى قبل التحليل: تملأ shots لكل PDF يحتاجها عند المزوّد الحالي. */
+async function prepareForProvider(files, pid) {
+  const P = PROVIDERS[pid] || PROVIDERS.anthropic;
+  if (P.supportsPdfNative || !P.supportsImages) return files;
+  for (const f of files) {
+    if (f.kind !== "pdf" || (f.text && f.text.length > 300) || (f.shots && f.shots.length)) continue;
+    try { f.shots = await pdfShots(f.data); } catch (e) { console.warn("pdf shots", e); }
+  }
+  return files;
 }
 async function extractPdfText(buf) {
   const pdfjs = await loadPdfJs();
@@ -382,12 +457,31 @@ function SettingsScreen({ onClose, first }) {
   const [key, setKey] = useState(getKey());
   const [pass, setPass] = useState(getPass());
   const [mode, setMode] = useState(API.mode);
+  const [prov, setProv] = useState(getProvider());
   const [model, setModel] = useState(getModel());
   const [show, setShow] = useState(false);
   const [test, setTest] = useState(null);
-  const save = () => { ls.set("midad:key", key.trim()); ls.set("midad:pass", pass.trim()); ls.set("midad:model", model); ls.set("midad:forceDirect", API.available && mode === "direct" ? "1" : "0"); API.mode = API.available ? mode : "direct"; };
-  const badKey = mode !== "proxy" && key.trim() && !ANT_KEY.test(key.trim());
-  const canTest = mode === "proxy" ? !!pass.trim() : !!key.trim() && !badKey;
+  const P = PROVIDERS[mode === "proxy" ? "anthropic" : prov];
+  const [models, setModels] = useState(null);
+  const [mBusy, setMBusy] = useState(false);
+  const [mErr, setMErr] = useState("");
+  const save = () => { ls.set("midad:key", key.trim()); ls.set("midad:pass", pass.trim()); ls.set("midad:provider", prov); ls.set("midad:model", model.trim()); ls.set("midad:forceDirect", API.available && mode === "direct" ? "1" : "0"); API.mode = API.available ? mode : "direct"; };
+  // تغيير المزوّد ينقل النموذج إلى أول نماذجه، فلا يُرسل اسم نموذج لا يعرفه
+  const pickProvider = (id) => { setProv(id); setModel(PROVIDERS[id].defaultModels[0]); setTest(null); setModels(null); setMErr(""); };
+  const loadModels = async () => {
+    setMBusy(true); setMErr("");
+    save();
+    try { setModels(await fetchModels()); } catch (e) { setMErr((e && e.message) || "تعذر جلب القائمة."); }
+    setMBusy(false);
+  };
+  // شكل المفتاح يدلّ على مزوّده، فيُنقل الاختيار وحده بدل رسالة خطأ
+  const onKey = (v) => {
+    setKey(v); setTest(null);
+    const guess = detectProvider(v);
+    if (guess && guess !== prov && !(prov === "deepseek" && guess === "openai")) pickProvider(guess);
+  };
+  const badKey = mode !== "proxy" && key.trim() ? keyMismatch(prov, key) : null;
+  const canTest = mode === "proxy" ? !!pass.trim() : !!key.trim() && !badKey && !!model.trim();
   const [secs, setSecs] = useState(0);
   useEffect(() => {
     if (!test?.busy) return;
@@ -409,7 +503,7 @@ function SettingsScreen({ onClose, first }) {
           </div>
         </>
       ) : (
-        <p className="text-sm leading-7 mb-6" style={{ color: C.mute }}>يعمل التطبيق بمفتاح API خاص بك. يُحفظ المفتاح في هذا المتصفح فقط ولا يُرسل إلى أي جهة سوى Anthropic.</p>
+        <p className="text-sm leading-7 mb-6" style={{ color: C.mute }}>يعمل التطبيق بمفتاح API خاص بك من المزوّد الذي تختاره. يُحفظ المفتاح في هذا المتصفح فقط ولا يُرسل إلا إلى مزوّده.</p>
       )}
       <div className="space-y-4">
         {mode === "proxy" && API.available && (
@@ -423,23 +517,52 @@ function SettingsScreen({ onClose, first }) {
             <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>تُحفظ في هذا المتصفح فقط. مفتاح API نفسه لا يصل إلى المتصفح أبدًا.</span>
           </label>
         )}
-        {(mode === "direct" || !API.available) && <label className="block">
-          <span className="text-sm block mb-1" style={{ color: C.mute }}>مفتاح API</span>
-          <div className="flex items-center gap-2 rounded-lg px-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
-            <KeyRound size={15} style={{ color: C.mute }} />
-            <input dir="ltr" type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-ant-..." className="flex-1 bg-transparent outline-none py-2.5 text-sm" style={{ fontFamily: "monospace" }} />
-            <button onClick={() => setShow(!show)} className="text-xs" style={{ color: C.mute }}>{show ? "أخفِ" : "أظهر"}</button>
-          </div>
-          {badKey
-            ? <span className="text-xs block mt-1 leading-6" style={{ color: C.copper }}>{NOT_ANTHROPIC}</span>
-            : <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>من console.anthropic.com ← Get API key ← Create Key. انسخه كاملًا مرة واحدة لأنه لا يُعرض مرة أخرى. ولا يعمل هنا مفتاح من مزوّد آخر.</span>}
-        </label>}
+        {(mode === "direct" || !API.available) && <>
+          <label className="block">
+            <span className="text-sm block mb-1" style={{ color: C.mute }}>المزوّد</span>
+            <select value={prov} onChange={(e) => pickProvider(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+              {PROVIDER_LIST.map((id) => <option key={id} value={id}>{PROVIDERS[id].label}</option>)}
+            </select>
+            <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>
+              {P.supportsImages ? "يقرأ النصوص والصور." : "يقرأ النصوص فقط؛ الملفات المصوّرة لا تعمل معه."}
+              {" "}{P.direct ? "يُنادى من جوالك مباشرة." : "يمرّ عبر خادم الموقع لأن مزوّده يمنع النداء من صفحة ويب؛ ومفتاحك يُستعمل في الطلب وحده ولا يُخزَّن."}
+              {" "}قواعد مِداد اللغوية كُتبت على كلود، وغيره قد يلتزم بها أقل.
+            </span>
+          </label>
+          <label className="block">
+            <span className="text-sm block mb-1" style={{ color: C.mute }}>مفتاح API</span>
+            <div className="flex items-center gap-2 rounded-lg px-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+              <KeyRound size={15} style={{ color: C.mute }} />
+              <input dir="ltr" type={show ? "text" : "password"} value={key} onChange={(e) => onKey(e.target.value)} placeholder={P.keyHint} className="flex-1 bg-transparent outline-none py-2.5 text-sm" style={{ fontFamily: "monospace" }} />
+              <button onClick={() => setShow(!show)} className="text-xs" style={{ color: C.mute }}>{show ? "أخفِ" : "أظهر"}</button>
+            </div>
+            {badKey
+              ? <span className="text-xs block mt-1 leading-6" style={{ color: C.copper }}>{badKey}</span>
+              : <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>من {P.console}. انسخه كاملًا؛ يُحفظ في هذا المتصفح ولا يُرسل إلا إلى {P.label}.</span>}
+          </label>
+        </>}
         <label className="block">
           <span className="text-sm block mb-1" style={{ color: C.mute }}>النموذج</span>
-          <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}` }}>
-            {MODEL_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select>
-          <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>إن لم يكن النموذج المختار متاحًا لحسابك ينتقل التطبيق تلقائيًا إلى نموذج بديل.</span>
+          <input dir="ltr" list="midad-models" value={model} onChange={(e) => setModel(e.target.value)} placeholder={P.defaultModels[0]}
+            className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: C.card, border: `1px solid ${C.line}`, fontFamily: "monospace" }} />
+          <datalist id="midad-models">{(models || P.defaultModels).map((m) => <option key={m} value={m} />)}</datalist>
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            {(models || P.defaultModels).slice(0, 4).map((m) => (
+              <button key={m} onClick={() => setModel(m)} className="text-xs px-2 py-1 rounded-full" dir="ltr"
+                style={{ background: model === m ? C.accSoft : C.grey, color: model === m ? C.acc : C.mute }}>{m}</button>
+            ))}
+            {!P.direct && mode !== "proxy" && (
+              <button onClick={loadModels} disabled={mBusy || !key.trim()} className="text-xs underline decoration-dotted" style={{ color: C.acc }}>
+                {mBusy ? "يجلب…" : "اجلب النماذج المتاحة في حسابي"}
+              </button>
+            )}
+          </div>
+          {mErr && <span className="text-xs block mt-1 leading-6" style={{ color: C.copper }}>{mErr}</span>}
+          {models && <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>{arNum(models.length)} نموذجًا متاحًا في حسابك.</span>}
+          <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>
+            {P.fallbacks ? "إن لم يكن النموذج المختار متاحًا لحسابك ينتقل التطبيق تلقائيًا إلى نموذج بديل."
+              : `الأسماء أعلاه اقتراحات، وأسماء النماذج تتغيّر. اكتب الاسم كما هو في لوحة حسابك عند ${P.label}.`}
+          </span>
         </label>
         <div className="flex flex-wrap items-center gap-3 pt-2">
           <Btn onClick={runTest} disabled={!canTest}><Sparkles size={15} /> احفظ واختبر الاتصال</Btn>
@@ -612,7 +735,9 @@ function Home({ cases, onNew, onOpen, onSettings, onImport, setToast }) {
 
 /* ───────────────────────── محرك التحليل ───────────────────────── */
 async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, caseType = "") {
-  const blocks = fileBlocks(files, sendRaw);
+  const pid = API.mode === "proxy" ? "anthropic" : getProvider();
+  await prepareForProvider(files, pid);
+  const blocks = fileBlocks(files, sendRaw, true, pid);
   // دفاع أخير: لا تُرسل ولا طلبًا واحدًا إن لم يصل مستند. الفشل هنا أرخص من ست مراحل فارغة.
   if (!blocks.length) throw new Error("لا توجد مستندات في هذه القضية، فلم يُرسل أي طلب. ارفع ملفات القضية أولًا من «أضف ملفات إلى القضية».");
   const a = { ...prev, errors: {} };
