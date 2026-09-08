@@ -73,6 +73,12 @@ function readBody(req) {
 async function handleRelay(req, res, pid) {
   const key = String(req.headers["x-midad-key"] || "").trim();
   const kind = String(req.headers["x-midad-kind"] || "chat");
+  // بلا هذا الشرط يصير الخادم وسيطًا مفتوحًا: أي أحد على الإنترنت يمرّر طلبه إلى
+  // OpenAI وغيره من عنوان هذا الموقع. كلمة مرور الموقع تحصر الاستعمال في أهله.
+  // ويُفحص قبل معرفة المزوّد حتى لا يُستدلّ على المزوّدين المقبولين بلا إذن.
+  if (PASS.length >= 6 && !safeEqual(req.headers["x-midad-pass"] || "", PASS)) {
+    return fail(res, 401, "midad_auth", "كلمة مرور الدخول غير صحيحة. أدخلها من الإعدادات قبل استعمال مفتاحك الشخصي.");
+  }
   const upstream = upstreamFor(pid, kind === "models" ? "models" : "chat");
   if (!upstream) return fail(res, 400, "midad_request", "مزوّد غير معروف أو لا يمرّ عبر الخادم.");
   if (!key) return fail(res, 401, "midad_auth", "لم يصل مفتاح المزوّد.");

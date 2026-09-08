@@ -144,7 +144,7 @@ async function llm(system, content, maxTokens = 4000) {
           method: "POST",
           signal: ctl ? ctl.signal : undefined,
           headers: proxy ? { "Content-Type": "application/json", "x-midad-pass": pass }
-            : viaServer ? { "Content-Type": "application/json", "x-midad-provider": pid, "x-midad-key": key }
+            : viaServer ? { "Content-Type": "application/json", "x-midad-provider": pid, "x-midad-key": key, ...(pass ? { "x-midad-pass": pass } : {}) }
               : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
           body: JSON.stringify(buildRequest(proxy ? "anthropic" : pid, { model, system, content, maxTokens })),
         });
@@ -196,7 +196,7 @@ async function fetchModels() {
   const bad = keyMismatch(pid, key);
   if (bad) throw new Error(bad);
   if (P.direct) return P.defaultModels;
-  const res = await fetch(API.proxy, { method: "POST", headers: { "x-midad-provider": pid, "x-midad-key": key, "x-midad-kind": "models" } });
+  const res = await fetch(API.proxy, { method: "POST", headers: { "x-midad-provider": pid, "x-midad-key": key, "x-midad-kind": "models", ...(getPass() ? { "x-midad-pass": getPass() } : {}) } });
   const raw = await res.text();
   let d; try { d = JSON.parse(raw); } catch { throw new Error("لم تُفهم قائمة النماذج من المزوّد."); }
   const er = d.error ? scrub(d.error.message || "", key) : (res.ok ? null : `تعذر جلب القائمة (${res.status}).`);
