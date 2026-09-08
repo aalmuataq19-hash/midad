@@ -97,26 +97,41 @@ function dual(iso, fallback) {
 
 const FALLBACKS = ["claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* مِداد يخاطب Anthropic وحدها. مفتاح مزوّد آخر يُرفض هنا لا بعد رحلة إلى الخادم،
+   فالرسالة تكون في مكانها وقتها، ولا يذهب المفتاح إلى جهة لا يخصّها. */
+const ANT_KEY = /^sk-ant-/;
+const NOT_ANTHROPIC = "هذا المفتاح ليس من Anthropic. مِداد يعمل بمفاتيح Anthropic وحدها، وهي تبدأ بـ sk-ant-. مفاتيح ChatGPT وGemini وغيرها لا تعمل هنا. احصل على مفتاح من console.anthropic.com ← Get API key.";
+const REQ_TIMEOUT = 300000;   // خمس دقائق: أطول من أي طلب حقيقي، وتمنع انتظارًا بلا نهاية
 async function llm(system, content, maxTokens = 4000) {
   const proxy = API.mode === "proxy";
   const key = getKey(), pass = getPass();
   if (proxy && !pass) throw new Error("لم تُدخل كلمة مرور الدخول بعد. افتح الإعدادات (رمز الترس في الصفحة الرئيسية).");
   if (!proxy && !key) throw new Error("لم يُدخل مفتاح API بعد. افتح الإعدادات (رمز الترس في الصفحة الرئيسية) وأدخله.");
+  if (!proxy && !ANT_KEY.test(key)) throw Object.assign(new Error(NOT_ANTHROPIC), { final: true });
   const pref = getModel();
   const models = [pref, ...FALLBACKS.filter((m) => m !== pref)];
   let lastErr = null, retried = false;
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
     try {
-      const res = await fetch(proxy ? API.proxy : "https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: proxy
-          ? { "Content-Type": "application/json", "x-midad-pass": pass }
-          : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-        // لا تُرسل temperature: ألغتها النماذج الحديثة (Sonnet 5 وOpus 5 وFable 5.1) وترد
-        // «temperature is deprecated for this model» وتفشل الطلب. النماذج الأقدم تقبل غيابها.
-        body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
-      });
+      const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), REQ_TIMEOUT) : null;
+      let res;
+      try {
+        res = await fetch(proxy ? API.proxy : "https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          signal: ctl ? ctl.signal : undefined,
+          headers: proxy
+            ? { "Content-Type": "application/json", "x-midad-pass": pass }
+            : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+          // لا تُرسل temperature: ألغتها النماذج الحديثة (Sonnet 5 وOpus 5 وFable 5.1) وترد
+          // «temperature is deprecated for this model» وتفشل الطلب. النماذج الأقدم تقبل غيابها.
+          body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
+        });
+      } catch (e) {
+        if (e && e.name === "AbortError") throw Object.assign(new Error("لم يردّ النموذج خلال خمس دقائق. أعد المحاولة، وإن تكرر فقلّل عدد المستندات أو حجمها."), { final: true });
+        throw e;
+      } finally { if (timer) clearTimeout(timer); }
       const raw = await res.text();
       let data; try { data = JSON.parse(raw); } catch { throw Object.assign(new Error(`استجابة غير مفهومة (${res.status}): ${raw.slice(0, 120)}`), { final: true }); }
       if (data.error || data.type === "error") {
@@ -371,7 +386,15 @@ function SettingsScreen({ onClose, first }) {
   const [show, setShow] = useState(false);
   const [test, setTest] = useState(null);
   const save = () => { ls.set("midad:key", key.trim()); ls.set("midad:pass", pass.trim()); ls.set("midad:model", model); ls.set("midad:forceDirect", API.available && mode === "direct" ? "1" : "0"); API.mode = API.available ? mode : "direct"; };
-  const canTest = mode === "proxy" ? !!pass.trim() : !!key.trim();
+  const badKey = mode !== "proxy" && key.trim() && !ANT_KEY.test(key.trim());
+  const canTest = mode === "proxy" ? !!pass.trim() : !!key.trim() && !badKey;
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    if (!test?.busy) return;
+    setSecs(0);
+    const t = setInterval(() => setSecs((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [test?.busy]);
   const runTest = async () => { save(); setTest({ busy: true }); try { const r = await testConnection(); setTest({ ok: true, msg: `الاتصال يعمل (${arNum(r.ms)} مللي ثانية).` }); } catch (e) { setTest({ ok: false, msg: e.message }); } };
   return (
     <div className="max-w-lg mx-auto px-6 pt-16 pb-24 fade">
@@ -407,7 +430,9 @@ function SettingsScreen({ onClose, first }) {
             <input dir="ltr" type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-ant-..." className="flex-1 bg-transparent outline-none py-2.5 text-sm" style={{ fontFamily: "monospace" }} />
             <button onClick={() => setShow(!show)} className="text-xs" style={{ color: C.mute }}>{show ? "أخفِ" : "أظهر"}</button>
           </div>
-          <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>من console.anthropic.com ← Get API key ← Create Key. انسخه كاملًا مرة واحدة لأنه لا يُعرض مرة أخرى.</span>
+          {badKey
+            ? <span className="text-xs block mt-1 leading-6" style={{ color: C.copper }}>{NOT_ANTHROPIC}</span>
+            : <span className="text-xs block mt-1 leading-6" style={{ color: C.mute }}>من console.anthropic.com ← Get API key ← Create Key. انسخه كاملًا مرة واحدة لأنه لا يُعرض مرة أخرى. ولا يعمل هنا مفتاح من مزوّد آخر.</span>}
         </label>}
         <label className="block">
           <span className="text-sm block mb-1" style={{ color: C.mute }}>النموذج</span>
@@ -420,7 +445,7 @@ function SettingsScreen({ onClose, first }) {
           <Btn onClick={runTest} disabled={!canTest}><Sparkles size={15} /> احفظ واختبر الاتصال</Btn>
           {!first && <Btn kind="ghost" onClick={() => { save(); onClose(); }}>احفظ وارجع</Btn>}
         </div>
-        {test?.busy && <div className="text-sm inline-flex items-center gap-2" style={{ color: C.mute }}><Loader2 size={14} className="animate-spin" /> يختبر…</div>}
+        {test?.busy && <div className="text-sm inline-flex items-center gap-2" style={{ color: C.mute }}><Loader2 size={14} className="animate-spin" /> يختبر… {arNum(secs)} ثانية{secs > 20 ? " — الخادم المجاني يستيقظ من السكون، امنحه دقيقة" : ""}</div>}
         {test && !test.busy && (
           <div className="text-sm rounded-lg p-3 leading-7" style={{ background: test.ok ? C.accSoft : C.copperSoft, color: test.ok ? C.acc : C.copper }}>
             {test.msg}
