@@ -109,3 +109,39 @@ test("الوسيط يقصّ max_tokens ولا يمس الكتل", async () => {
   assert.equal(upstream.max_tokens, 8000);
   assert.equal(upstream.messages[0].content[1].cache_control.type, "ephemeral");
 });
+
+test("١٠ — مفتاح الحد من الطلبات يؤخذ من آخر x-forwarded-for لا أولها", async () => {
+  // العميل يكتب أول قيمة بنفسه؛ لو اعتُمدت لأمكن تزييفها والتملّص من الحد
+  const one = await fetch(`http://127.0.0.1:${PORT}/api`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-midad-pass": "test-password", "x-forwarded-for": "1.1.1.1, 9.9.9.9" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "س" }] }),
+  });
+  assert.equal(one.status, 200);
+});
+
+test("رؤوس الأمان وETag على الملفات الثابتة", async () => {
+  const r = await fetch(`http://127.0.0.1:${PORT}/`);
+  const csp = r.headers.get("content-security-policy") || "";
+  assert.match(csp, /default-src 'none'/);
+  assert.match(csp, /script-src [^;]*cdnjs\.cloudflare\.com/);
+  assert.match(csp, /script-src [^;]*'sha256-/, "بصمة النص المضمّن لا 'unsafe-inline'");
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "لا unsafe-inline للنصوص");
+  assert.match(csp, /connect-src [^;]*api\.anthropic\.com/);
+  assert.match(csp, /frame-ancestors 'self'/);
+  assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+  const tag = r.headers.get("etag");
+  assert.ok(tag, "ETag موجود");
+  const again = await fetch(`http://127.0.0.1:${PORT}/`, { headers: { "If-None-Match": tag } });
+  assert.equal(again.status, 304, "البصمة نفسها ترد 304 بلا إعادة تنزيل");
+});
+
+test("القائمة البيضاء للملفات الثابتة", async () => {
+  for (const [path, code] of [["/", 200], ["/app.js", 200], ["/healthz", 200],
+                              ["/server.js", 404], ["/HANDOFF.md", 404], ["/app.src.jsx", 404],
+                              ["/package.json", 404], ["/src/providers.js", 404], ["/.env", 404]]) {
+    const r = await fetch(`http://127.0.0.1:${PORT}${path}`);
+    assert.equal(r.status, code, `${path} توقّع ${code}`);
+  }
+});

@@ -34,7 +34,44 @@ function upstreamFor(id, kind) {
 // الملفات العامة المسموح بتقديمها فقط (البقية، مثل server.js، لا تُعرض)
 const PUBLIC_FILES = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/library/anzima.json": "library/anzima.json" };
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8" };
+/* سياسة أمن المحتوى. المسموح فقط: نصوص من cdnjs وtailwind، وخطوط جوجل،
+   واتصال بالخادم نفسه وبعناوين المزوّدين. Tailwind (Play CDN) يحقن أنماطًا وقت
+   التشغيل فيلزم 'unsafe-inline' للأنماط لا للنصوص. وdata: للأيقونة وصور المستندات
+   وblob: للتصدير، وframe-src data: ليعمل عارض PDF الأصلي. */
+/* في index.html نصٌّ مضمّن يعرض رسالة عربية إن لم تُحمَّل المكتبات. بدل فتح الباب
+   بـ'unsafe-inline' تُحسب بصمته من الملف نفسه عند الإقلاع، فلا تتخلّف عن أي تعديل فيه. */
+function inlineScriptHashes() {
+  try {
+    const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+    const out = [];
+    for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+      out.push(`'sha256-${crypto.createHash("sha256").update(m[1], "utf8").digest("base64")}'`);
+    }
+    return out;
+  } catch (e) { console.error("csp hash:", e.message); return []; }
+}
+const INLINE_HASHES = inlineScriptHashes();
+const CSP = [
+  "default-src 'none'",
+  `script-src 'self' https://cdnjs.cloudflare.com https://cdn.tailwindcss.com ${INLINE_HASHES.join(" ")}`,
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob:",
+  "media-src 'self' data: blob:",
+  `connect-src 'self' ${ALLOWED_BASES.join(" ")} https://cdnjs.cloudflare.com`,
+  "worker-src 'self' blob:",
+  "frame-src 'self' data: blob:",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join("; ");
 
+/* أول قيمة في x-forwarded-for يكتبها العميل نفسه، فتزييفها كان يلغي الحد بالكامل.
+   خلف وسيط واحد موثوق (Render) الصحيح هو آخر قيمة، فهي التي أضافها الوسيط. */
+function clientIp(req) {
+  const xf = String(req.headers["x-forwarded-for"] || "").split(",").map((x) => x.trim()).filter(Boolean);
+  return xf.length ? xf[xf.length - 1] : (req.socket.remoteAddress || "x");
+}
 const buckets = new Map();
 function rateOk(ip) {
   if (RATE <= 0) return true;
@@ -82,8 +119,7 @@ async function handleRelay(req, res, pid) {
   const upstream = upstreamFor(pid, kind === "models" ? "models" : "chat");
   if (!upstream) return fail(res, 400, "midad_request", "مزوّد غير معروف أو لا يمرّ عبر الخادم.");
   if (!key) return fail(res, 401, "midad_auth", "لم يصل مفتاح المزوّد.");
-  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "x").toString().split(",")[0].trim();
-  if (!rateOk(ip)) return fail(res, 429, "midad_rate", "طلبات كثيرة في وقت قصير.");
+  if (!rateOk(clientIp(req))) return fail(res, 429, "midad_rate", "طلبات كثيرة في وقت قصير.");
 
   let body = null;
   if (kind !== "models") {
@@ -124,8 +160,7 @@ async function handleApi(req, res, url) {
   if (PASS.length < 6) return fail(res, 500, "midad_config", "لم يُضبط ACCESS_PASSWORD (٦ أحرف على الأقل) في متغيرات البيئة.");
   const given = req.headers["x-midad-pass"] || "";
   if (!safeEqual(given, PASS)) return fail(res, 401, "midad_auth", "كلمة مرور الدخول غير صحيحة.");
-  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "x").toString().split(",")[0].trim();
-  if (!rateOk(ip)) return fail(res, 429, "midad_rate", "طلبات كثيرة في وقت قصير.");
+  if (!rateOk(clientIp(req))) return fail(res, 429, "midad_rate", "طلبات كثيرة في وقت قصير.");
 
   let raw;
   try { raw = await readBody(req); } catch (e) { return fail(res, 413, "midad_request", e.message === "too_large" ? "حجم الطلب يتجاوز ٦٤ ميجابايت." : "تعذرت قراءة الطلب."); }
@@ -156,26 +191,46 @@ async function handleApi(req, res, url) {
   } finally { clearTimeout(timer); }
 }
 
+/* الملفات الثابتة تُقرأ وتُضغط مرة واحدة وتبقى في الذاكرة مع بصمتها.
+   قبله كان gzipSync لمكتبة ٢٫٥ م.ب يعمل في كل طلب، وهو متزامن يوقف الحلقة كلها. */
+const fileCache = new Map();
+function loadStatic(file, cb) {
+  const full = path.join(__dirname, file);
+  fs.stat(full, (e1, st) => {
+    if (e1) return cb(e1);
+    const tag = `"${st.size.toString(16)}-${st.mtimeMs.toString(16)}"`;
+    const hit = fileCache.get(file);
+    if (hit && hit.tag === tag) return cb(null, hit);
+    fs.readFile(full, (e2, data) => {
+      if (e2) return cb(e2);
+      let gz = null;
+      if (data.length > 1024) { try { gz = zlib.gzipSync(data); } catch (e) { console.error("gzip:", e.message); } }
+      const entry = { tag, data, gz, type: MIME[path.extname(file)] || "application/octet-stream" };
+      fileCache.set(file, entry);
+      cb(null, entry);
+    });
+  });
+}
 function serveStatic(req, res, url) {
   const file = PUBLIC_FILES[url.pathname];
   if (!file) return send(res, 404, "not found", "text/plain; charset=utf-8");
-  const full = path.join(__dirname, file);
-  fs.readFile(full, (err, data) => {
+  loadStatic(file, (err, entry) => {
     if (err) return send(res, 404, "not found", "text/plain; charset=utf-8");
-    const ext = path.extname(file);
-    const cache = "no-cache";
-    // مكتبة الأنظمة تتجاوز ٢ ميجابايت؛ ضغطها يوفّر على جوال المستخدم كثيرًا.
-    const extra = {};
-    if (data.length > 64 * 1024 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
-      try { data = zlib.gzipSync(data); extra["Content-Encoding"] = "gzip"; } catch (e) { console.error("gzip:", e.message); }
-    }
-    send(res, 200, data, MIME[ext] || "application/octet-stream", {
-      ...extra,
-      "Cache-Control": cache,
+    const head = {
+      "Cache-Control": "no-cache",           // يراجع الخادم في كل مرة، ولا يبقى على نسخة قديمة
+      "ETag": entry.tag,
       "X-Frame-Options": "SAMEORIGIN",
       "Referrer-Policy": "no-referrer",
       "X-Robots-Tag": "noindex, nofollow",
-    });
+      "Content-Security-Policy": CSP,
+    };
+    // البصمة نفسها: لا يُعاد تنزيل ٢٣٠ ك.ب في كل فتح
+    if (req.headers["if-none-match"] === entry.tag) {
+      if (res.headersSent || res.writableEnded || res.destroyed) return;
+      res.writeHead(304, head); return res.end();
+    }
+    const useGz = entry.gz && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
+    send(res, 200, useGz ? entry.gz : entry.data, entry.type, useGz ? { ...head, "Content-Encoding": "gzip", "Vary": "Accept-Encoding" } : { ...head, "Vary": "Accept-Encoding" });
   });
 }
 
@@ -194,6 +249,16 @@ process.on("uncaughtException", (e) => console.error("uncaughtException:", (e &&
 server.requestTimeout = 300000;
 server.headersTimeout = 305000;
 server.keepAliveTimeout = 65000;
+// Render يرسل SIGTERM عند كل نشر. بلا إغلاق لطيف تُقطع طلبات جارية في منتصفها.
+let closing = false;
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => {
+  if (closing) return;
+  closing = true;
+  console.log(`${sig}: يغلق الخادم بلطف…`);
+  server.close(() => process.exit(0));
+  // ولا ينتظر إلى الأبد طلبًا معلّقًا
+  setTimeout(() => process.exit(0), 15000).unref();
+});
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`midad listening on ${PORT} | key:${KEY.startsWith("sk-ant-") ? "set" : "MISSING"} | password:${PASS.length >= 6 ? "set" : "MISSING"} | models:${ALLOWED.join(",")}`);
 });
