@@ -605,6 +605,22 @@ function App() {
   }, []);
   useEffect(() => { if (!loaded) return; clearTimeout(saveT.current); saveT.current = setTimeout(() => sset("midad:cases", cases), 600); }, [cases, loaded]);
   useEffect(() => { if (!loaded) return; clearTimeout(saveL.current); saveL.current = setTimeout(() => sset("midad:library", library), 600); }, [library, loaded]);
+  // الحفظ مؤجَّل ٦٠٠ مللي ثانية. وسفاري الجوال يجمّد المؤقّتات لحظة الخروج من التبويب،
+  // فآخر ما كتبه القاضي كان يضيع. هنا يُفرَّغ فورًا قبل أن تُخفى الصفحة أو تُغلق.
+  const latest = useRef({ cases, library });
+  latest.current = { cases, library };
+  useEffect(() => {
+    if (!loaded) return;
+    const flush = () => {
+      clearTimeout(saveT.current); clearTimeout(saveL.current);
+      sset("midad:cases", latest.current.cases);
+      sset("midad:library", latest.current.library);
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => { window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", onHide); };
+  }, [loaded]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 2600); return () => clearTimeout(t); }, [toast]);
 
   const updateCase = (id, fn) => setCases((cs) => cs.map((c) => c.id === id ? { ...(typeof fn === "function" ? fn(c) : { ...c, ...fn }), updatedAt: Date.now() } : c));
