@@ -111,11 +111,11 @@ function pj(t) {
 
 // الطبقة الثالثة: يُرسل النص للنموذج ليصلحه حين تعجز الطبقتان قبله.
 function createPjOrFix(fix) {
-  return async function pjOrFix(text) {
+  return async function pjOrFix(text, signal) {
     try { return pj(text); }
     catch (e1) {
       if (!e1.parseFail) throw e1;
-      return pj(await fix(String(text == null ? "" : text).slice(0, 60000)));
+      return pj(await fix(String(text == null ? "" : text).slice(0, 60000), signal));
     }
   };
 }

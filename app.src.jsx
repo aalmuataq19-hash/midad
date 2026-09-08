@@ -114,9 +114,11 @@ function dual(iso, fallback) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const REQ_TIMEOUT = 300000;   // خمس دقائق: أطول من أي طلب حقيقي، وتمنع انتظارًا بلا نهاية
+const STOPPED = "أوقفتَ التحليل.";
 /* خادم الموقع يحمل مفتاح Anthropic وحده، فوضع «كلمة مرور الموقع» يبقى عليها.
    والمفتاح الشخصي يذهب من المتصفح مباشرة إلى المزوّد الذي اختاره صاحبه. */
-async function llm(system, content, maxTokens = 4000) {
+async function llm(system, content, maxTokens = 4000, outerSignal = null) {
+  if (outerSignal && outerSignal.aborted) throw Object.assign(new Error(STOPPED), { final: true, stopped: true });
   const proxy = API.mode === "proxy";
   const key = getKey(), pass = getPass();
   const pid = proxy ? "anthropic" : getProvider();
@@ -138,6 +140,9 @@ async function llm(system, content, maxTokens = 4000) {
     try {
       const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
       const timer = ctl ? setTimeout(() => ctl.abort(), REQ_TIMEOUT) : null;
+      // إلغاء القاضي يقطع الطلب الجاري فورًا، ولا ينتظر انقضاء المهلة
+      const onStop = () => ctl && ctl.abort();
+      if (outerSignal && ctl) outerSignal.addEventListener("abort", onStop);
       let res;
       try {
         res = await fetch(viaServer ? API.proxy : P.baseUrl + P.path, {
@@ -149,9 +154,12 @@ async function llm(system, content, maxTokens = 4000) {
           body: JSON.stringify(buildRequest(proxy ? "anthropic" : pid, { model, system, content, maxTokens })),
         });
       } catch (e) {
-        if (e && e.name === "AbortError") throw Object.assign(new Error("لم يردّ النموذج خلال خمس دقائق. أعد المحاولة، وإن تكرر فقلّل عدد المستندات أو حجمها."), { final: true });
+        if (e && e.name === "AbortError") {
+          if (outerSignal && outerSignal.aborted) throw Object.assign(new Error(STOPPED), { final: true, stopped: true });
+          throw Object.assign(new Error("لم يردّ النموذج خلال خمس دقائق. أعد المحاولة، وإن تكرر فقلّل عدد المستندات أو حجمها."), { final: true });
+        }
         throw e;
-      } finally { if (timer) clearTimeout(timer); }
+      } finally { if (timer) clearTimeout(timer); if (outerSignal && ctl) outerSignal.removeEventListener("abort", onStop); }
       const raw = await res.text();
       let data; try { data = JSON.parse(raw); } catch { throw Object.assign(new Error(`استجابة غير مفهومة (${res.status}): ${scrub(raw, key).slice(0, 120)}`), { final: true }); }
       // أخطاء خادم الموقع تخصّ مِداد نفسه، فتُقرأ قبل أخطاء المزوّد
@@ -213,7 +221,7 @@ async function testConnection() {
 const { repairJSON, pj, createPjOrFix } = require("./src/json-repair.js");
 const { isMangled } = require("./src/pdf-quality.js");
 const FIX_SYS = "أنت مصلح JSON. تستلم نصًا يُفترض أنه JSON لكنه غير صالح، فتعيده JSON صالحًا تمامًا بنفس المحتوى والمفاتيح، بلا أي نص قبله أو بعده وبلا markdown. إن كان مقطوعًا فأغلقه بأقل تعديل ممكن دون اختراع بيانات.";
-const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000));
+const pjOrFix = createPjOrFix((text, sig) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000, sig));
 /* استيراد تحليل أُنتج خارج الموقع (أمر /midad-analyze في Claude Code).
    يُتحقق من البنية قبل قبوله، ويوسَم بـ imported ليعرف التطبيق أن لا ملفات وراءه. */
 const A_ARRAYS = ["parties", "issues", "facts", "pl", "df", "defenses", "evidence", "conflicts", "gaps"];
@@ -311,7 +319,7 @@ function fileBlocks(files, sendRaw = false, cache = true, pid = null) {
    بذلك من نحو ٣٤٧ ألف حرف في كل تحليل إلى نحو ٦٤ ألفًا. */
 const IDX_MIN = 60;        // دون هذا العدد لا يستحق الأمر طلبًا إضافيًا
 const IDX_MAX_PICKS = 40;
-async function pickStatutes(statutes, brief) {
+async function pickStatutes(statutes, brief, signal) {
   if (statutes.length <= IDX_MIN) return { picked: statutes, indexed: false, from: statutes.length };
   const index = statutes.map((x, i) => `${i + 1}. ${x.ref} — ${x.system}${lastPart(x.path) ? ` — ${lastPart(x.path)}` : ""}`).join("\n");
   const text = `هذه مسائل قضية وما ورد فيها من طلبات ودفوع:
@@ -324,7 +332,7 @@ ${index}
 اختر من هذا الفهرس وحده، ولا تذكر رقمًا ليس فيه. هذا اختيارٌ لما يُعرض على القاضي، وليس ترجيحًا ولا حكمًا ولا تقييمًا.
 إن لم يظهر لك ارتباط فأعد مصفوفة فارغة، ولا تملأها بالتخمين.
 أعد JSON بهذا الشكل بالضبط: {"picks":[1,2,3]}`;
-  const out = await pjOrFix(await llm(SYS, [{ type: "text", text, cache_control: { type: "ephemeral" } }], 4000));
+  const out = await pjOrFix(await llm(SYS, [{ type: "text", text, cache_control: { type: "ephemeral" } }], 4000, signal), signal);
   const nums = (out.picks || []).map((v) => parseInt(v, 10)).filter((v) => Number.isFinite(v) && v >= 1 && v <= statutes.length);
   return { picked: [...new Set(nums)].slice(0, IDX_MAX_PICKS).map((v) => statutes[v - 1]), indexed: true, from: statutes.length };
 }
@@ -785,15 +793,20 @@ function Home({ cases, onNew, onOpen, onSettings, onImport, setToast }) {
 }
 
 /* ───────────────────────── محرك التحليل ───────────────────────── */
-async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, caseType = "") {
+/* onStage(i, حالة, رسالة). signal يلغي الجاري. only يحصر التنفيذ في مراحل بعينها،
+   فإعادة مرحلة فاشلة لا تدفع ثمن الست كلها ولا تمحو ما نجح منها. */
+async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, caseType = "", signal = null, only = null) {
   const pid = API.mode === "proxy" ? "anthropic" : getProvider();
   await prepareForProvider(files, pid);
   const blocks = fileBlocks(files, sendRaw, true, pid);
   // دفاع أخير: لا تُرسل ولا طلبًا واحدًا إن لم يصل مستند. الفشل هنا أرخص من ست مراحل فارغة.
   if (!blocks.length) throw new Error("لا توجد مستندات في هذه القضية، فلم يُرسل أي طلب. ارفع ملفات القضية أولًا من «أضف ملفات إلى القضية».");
-  const a = { ...prev, errors: {} };
+  const a = { ...prev, errors: { ...(only ? prev.errors : {}) } };
   for (let i = 0; i < STAGES.length; i++) {
     const [key] = STAGES[i];
+    if (only && !only.includes(key)) { onStage(i, prev.errors && prev.errors[key] ? "err" : "skip"); continue; }
+    if (signal && signal.aborted) { onStage(i, "stop"); continue; }
+    if (only) delete a.errors[key];
     onStage(i, "run");
     try {
       let use = statutes;
@@ -805,7 +818,7 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, c
           "طلبات المدعى عليه": (a.df || []).map((x) => x.text),
         };
         try {
-          const r = await pickStatutes(statutes, brief);
+          const r = await pickStatutes(statutes, brief, signal);
           use = r.picked;
           a.lawPick = { from: r.from, to: use.length, indexed: r.indexed, at: Date.now() };
         } catch (e) {
@@ -816,7 +829,7 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, c
         }
       }
       const ctx = { issues: (a.issues || []).map((x) => x.title), statutes: use, caseType };
-      const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 8000));
+      const out = await pjOrFix(await llm(SYS, [...blocks, { type: "text", text: stagePrompt(key, ctx) }], 8000, signal), signal);
       if (key === "overview") { a.summary = out.summary; a.parties = out.parties || []; a.issues = (out.issues || []).map((x) => ({ title: x.title })); a.meta = out.meta || {}; }
       else if (key === "facts") a.facts = out.facts || [];
       else if (key === "reqdef") { a.pl = out.pl || []; a.df = out.df || []; a.defenses = out.defenses || []; }
@@ -824,7 +837,11 @@ async function runStages(files, statutes, onStage, prev = {}, sendRaw = false, c
       else if (key === "issues") { const det = out.issues || []; a.issues = (a.issues || []).map((x, j) => ({ ...x, ...(det[j] || {}), title: x.title })); }
       else if (key === "review") { a.conflicts = out.conflicts || []; a.gaps = out.gaps || []; }
       onStage(i, "ok");
-    } catch (e) { const m = (e && e.message) || String(e) || "خطأ غير معروف"; a.errors[key] = m; onStage(i, "err", m); }
+    } catch (e) {
+      const m = (e && e.message) || String(e) || "خطأ غير معروف";
+      if (e && e.stopped) { onStage(i, "stop"); a.stopped = true; break; }
+      a.errors[key] = m; onStage(i, "err", m);
+    }
   }
   a.done = true; a.at = Date.now();
   return a;
@@ -839,22 +856,36 @@ function compact(a) {
     gaps: (a.gaps || []).map((x) => x.text),
   };
 }
-function Progress({ status, errs = {} }) {
+/* الوجهة الفعلية للملفات تختلف بحسب الوضع والمزوّد، وقولها على الشاشة تصريح خصوصية
+   لا زينة، فيجب أن يطابق ما يحدث فعلًا. */
+function destinationNote() {
+  if (API.mode === "proxy") return "تُرسل الملفات من متصفحك إلى خادم هذا الموقع، ومنه إلى Anthropic بمفتاح الخادم.";
+  const P = PROVIDERS[getProvider()] || PROVIDERS.anthropic;
+  return P.direct
+    ? `تُرسل الملفات من متصفحك مباشرة إلى ${P.label} بمفتاحك، ولا تمر بخادم الموقع.`
+    : `تُرسل الملفات من متصفحك إلى خادم هذا الموقع، ومنه إلى ${P.label} بمفتاحك. ولا يُخزَّن المفتاح ولا الملفات في الخادم.`;
+}
+function Progress({ status, errs = {}, onStop, stopping }) {
   return (
     <div className="rounded-xl p-6" style={{ background: C.card, border: `1px solid ${C.line}` }}>
-      <div className="font-semibold mb-4">يعمل مِداد على ترتيب الملف…</div>
+      <div className="font-semibold mb-4">{stopping ? "يوقف التحليل…" : "يعمل مِداد على ترتيب الملف…"}</div>
       <ol className="space-y-3">
         {STAGES.map(([k, label], i) => {
           const st = status[i];
           return (
-            <li key={k} className="flex items-center gap-3 text-sm" style={{ color: st ? C.ink : C.mute }}>
+            <li key={k} className="flex items-center gap-3 text-sm" style={{ color: st && st !== "skip" ? C.ink : C.mute }}>
               {st === "run" ? <Loader2 size={16} className="animate-spin shrink-0" style={{ color: C.acc }} /> : st === "ok" ? <CheckCircle2 size={16} className="shrink-0" style={{ color: C.acc }} /> : st === "err" ? <AlertTriangle size={16} className="shrink-0" style={{ color: C.copper }} /> : <Circle size={16} className="shrink-0" />}
-              <span>{label}{st === "err" && errs[i] && <span className="block text-xs mt-0.5 leading-5" style={{ color: C.copper }}>{errs[i]}</span>}</span>
+              <span>{label}
+                {st === "skip" && <span className="text-xs mr-2" style={{ color: C.mute }}>(لم تُعَد)</span>}
+                {st === "stop" && <span className="text-xs mr-2" style={{ color: C.mute }}>(أُوقفت)</span>}
+                {st === "err" && errs[i] && <span className="block text-xs mt-0.5 leading-5" style={{ color: C.copper }}>{errs[i]}</span>}
+              </span>
             </li>
           );
         })}
       </ol>
-      <div className="text-xs mt-4" style={{ color: C.mute }}>الملفات تُرسل للتحليل الآن مباشرة إلى Anthropic API. استخدم بيانات وهمية فقط.</div>
+      {onStop && <div className="mt-5"><Btn kind="ghost" small onClick={onStop} disabled={stopping}><X size={14} /> {stopping ? "يوقف…" : "أوقف التحليل"}</Btn></div>}
+      <div className="text-xs mt-4 leading-6" style={{ color: C.mute }}>{destinationNote()} استخدم بيانات وهمية فقط.</div>
     </div>
   );
 }
@@ -895,9 +926,15 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
     try { await doImport(await readImport(file)); }
     catch (e) { setErr((e && e.message) || "تعذر قراءة الملف."); }
   };
+  const stopRef = useRef(null);
+  const startedRef = useRef(false);       // حارس متزامن: ضغطتان سريعتان لا تبدآن تحليلين
+  const [stopping, setStopping] = useState(false);
   const start = async () => {
+    if (startedRef.current) return;
     if (!files.length) { setErr("ارفع ملفًا واحدًا على الأقل قبل بدء التحليل."); return; }
-    setErr(""); setBusy(true);
+    startedRef.current = true;
+    setErr(""); setBusy(true); setStopping(false);
+    stopRef.current = typeof AbortController !== "undefined" ? new AbortController() : null;
     const id = uid();
     const c = { id, ...f, sendRaw, files: files.map(({ id: fid, name, kind, size }) => ({ id: fid, name, kind, size })), createdAt: Date.now(), updatedAt: Date.now(), analysis: null, notes: {}, freeNotes: [], sessionLog: {}, direction: "", memoVersions: [], visited: [], chosenQ: {}, linked: {}, chat: [], whatsNew: null };
     try {
@@ -906,19 +943,21 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
       if (unsaved.length) { setBusy(false); setErr(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح (قد تكون ممتلئة). احذف قضية قديمة أو قلّل حجم الملفات ثم أعد المحاولة.`); for (const fl of files) await sdel(`midad:file:${id}:${fl.id}`); return; }
       const st = [];
       const er = {};
-        const a = await runStages(files, caseStatutes(f, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw, f.type);
+        const a = await runStages(files, caseStatutes(f, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setStatus([...st]); setErrs({ ...er }); }, {}, sendRaw, f.type, stopRef.current && stopRef.current.signal);
       const meta = a.meta || {};
       const merged = { ...c, number: c.number || meta.number || "", court: c.court || meta.court || "", circuit: c.circuit || meta.circuit || "", subject: c.subject || meta.subject || "", analysis: a };
       onCreated(merged);
       const failed = Object.keys(a.errors || {}).length;
-      setToast(failed ? `اكتمل التحليل مع ${arNum(failed)} قسم تعذر. يمكنك إعادته من داخل القضية.` : "اكتمل ترتيب الملف.");
+      setToast(a.stopped ? "أُوقف التحليل. فُتحت القضية بما اكتمل منه، وتقدر تكمله من داخلها."
+        : failed ? `اكتمل التحليل مع ${arNum(failed)} قسم تعذر. يمكنك إعادته من داخل القضية.` : "اكتمل ترتيب الملف.");
     } catch (e) {
       // القضية تُفتح على كل حال حتى لا تضيع الملفات المحفوظة ويمكن حذفها أو إعادة تحليلها.
       onCreated({ ...c, analysis: { done: false, errors: { overview: (e && e.message) || String(e) } } });
       setToast("تعذر بدء التحليل. فُتحت القضية بملفاتها، وتقدر تعيد التحليل من داخلها.");
-    } finally { setBusy(false); }
+    } finally { setBusy(false); startedRef.current = false; }
   };
-  if (busy) return <div className="max-w-xl mx-auto px-6 pt-24"><Progress status={status} errs={errs} /></div>;
+  if (busy) return <div className="max-w-xl mx-auto px-6 pt-24"><Progress status={status} errs={errs} stopping={stopping}
+    onStop={() => { setStopping(true); stopRef.current && stopRef.current.abort(); }} /></div>;
   return (
     <div className="max-w-xl mx-auto px-6 pt-12 pb-24 fade">
       <button onClick={onCancel} className="text-sm mb-6 inline-flex items-center gap-1" style={{ color: C.mute }}><ChevronRight size={16} /> الرئيسية</button>
@@ -1085,10 +1124,13 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
     if (!newFiles.length && a.imported) { setConfirmRe({ kind: "imported" }); return; }
     doReanalyze(newFiles);
   };
-  const doReanalyze = async (newFiles = []) => {
+  const stopRef = useRef(null);
+  const [stopping, setStopping] = useState(false);
+  const doReanalyze = async (newFiles = [], only = null) => {
     if (reanalyzing) return;
     setConfirmRe(null);
-    const st = []; setReanalyzing([...st]); setReErrs({});
+    const st = []; setReanalyzing([...st]); setReErrs({}); setStopping(false);
+    stopRef.current = typeof AbortController !== "undefined" ? new AbortController() : null;
     try {
     const all = [...(await loadFiles(c)), ...newFiles];
     const unsaved = [];
@@ -1098,7 +1140,9 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
     if (unsaved.length) setToast(`تعذر حفظ: ${unsaved.join("، ")} في ذاكرة المتصفح.`);
     const prevA = c.analysis;
     const er = {};
-    const res = await runStages(all, caseStatutes(c, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, {}, c.sendRaw, c.type);
+    // عند إعادة مرحلة بعينها تُبنى النتيجة على الدراسة القائمة، فلا يُمحى ما نجح
+    const base = only ? { ...(c.analysis || {}) } : {};
+    const res = await runStages(all, caseStatutes(c, library), (i, s, m) => { st[i] = s; if (m) er[i] = m; setReanalyzing([...st]); setReErrs({ ...er }); }, base, c.sendRaw, c.type, stopRef.current && stopRef.current.signal, only);
     let whatsNew = c.whatsNew;
     if (prevA?.done && prevA.summary && newFiles.length) {
       try {
@@ -1110,12 +1154,16 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
       } catch (e) { whatsNew = { changes: [], unchanged: "", error: e.message, at: Date.now() }; }
     }
     update((x) => ({ ...x, analysis: res, prevAnalysis: prevA, whatsNew, memoVersions: x.memoVersions }));
-    setToast(newFiles.length ? "أُضيفت الملفات وأُعيد ترتيب الدراسة." : "أُعيد ترتيب الدراسة.");
+    setToast(res.stopped ? "أُوقف التحليل. حُفظ ما اكتمل منه."
+      : only ? `أُعيدت ${only.map(stageLabel).join("، ")}.`
+      : newFiles.length ? "أُضيفت الملفات وأُعيد ترتيب الدراسة." : "أُعيد ترتيب الدراسة.");
     if (newFiles.length && prevA?.done && prevA.summary) setPanel("new");
     } catch (e) {
       setToast(`تعذر إعادة التحليل: ${(e && e.message) || e}`);
-    } finally { setReanalyzing(null); }
+    } finally { setReanalyzing(null); setStopping(false); }
   };
+  // إعادة مرحلة واحدة فاشلة: لا تدفع ثمن الست، ولا تمحو ما نجح منها
+  const retryStage = (key) => { if (!(c.files || []).length) { setConfirmRe({ kind: "nofiles" }); return; } doReanalyze([], [key]); };
   const addMore = async (list) => {
     const out = [];
     for (const file of Array.from(list)) { try { out.push(await readFile(file)); } catch (e) { setToast(e.message); } }
@@ -1171,7 +1219,8 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
         </div>
 
         <div className="px-4 md:px-8 py-8 max-w-4xl fade" key={sec}>
-          {reanalyzing ? <Progress status={reanalyzing} errs={reErrs} /> : !a.done ? (
+          {reanalyzing ? <Progress status={reanalyzing} errs={reErrs} stopping={stopping}
+            onStop={() => { setStopping(true); stopRef.current && stopRef.current.abort(); }} /> : !a.done ? (
             <Empty>لم يُحلَّل الملف بعد. <button className="underline" onClick={() => reanalyze([])}>ابدأ التحليل</button></Empty>
           ) : (
             <>
@@ -1185,8 +1234,13 @@ function Workspace({ c, library, setLibrary, update, loadFiles, onHome, onDelete
                 <div className="rounded-lg p-4 mb-6 text-sm" style={{ background: C.amberSoft, color: C.amber }}>
                   <div className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" /><div className="leading-7">تعذر إكمال: {Object.keys(a.errors).map((k) => stageLabel(k)).join("، ")}.</div></div>
                   <div className="text-xs mt-2 leading-6 rounded p-2" style={{ background: "rgba(255,255,255,0.6)", color: C.copper }}>سبب الخطأ: {Object.values(a.errors)[0]}</div>
-                  <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
-                    <button className="underline" onClick={() => reanalyze([])}>أعد التحليل</button>
+                  <div className="flex flex-wrap items-center gap-2 mt-3 text-xs">
+                    {Object.keys(a.errors).filter((k) => STAGES.some((x) => x[0] === k)).map((k) => (
+                      <button key={k} onClick={() => retryStage(k)} className="px-2 py-1 rounded" style={{ background: C.card, border: `1px solid ${C.line}`, color: C.acc }}>
+                        أعد «{stageLabel(k)}» وحدها
+                      </button>
+                    ))}
+                    <button className="underline" onClick={() => reanalyze([])}>أعد التحليل كاملًا</button>
                     <button className="underline" onClick={runTest}>اختبر الاتصال</button>
                     {(c.files || []).some((x) => x.kind === "pdf") && <button className="underline" onClick={() => update((x) => ({ ...x, sendRaw: !x.sendRaw }))}>{c.sendRaw ? "أرسل PDF كنص مستخرج" : "أرسل PDF كما هو"}</button>}
                     {conn?.busy && <span className="inline-flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> يختبر…</span>}
