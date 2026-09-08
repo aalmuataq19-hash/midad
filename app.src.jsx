@@ -211,6 +211,7 @@ async function testConnection() {
   return { ok: true, ms: Date.now() - t0, txt: txt.trim().slice(0, 30) };
 }
 const { repairJSON, pj, createPjOrFix } = require("./src/json-repair.js");
+const { isMangled } = require("./src/pdf-quality.js");
 const FIX_SYS = "أنت مصلح JSON. تستلم نصًا يُفترض أنه JSON لكنه غير صالح، فتعيده JSON صالحًا تمامًا بنفس المحتوى والمفاتيح، بلا أي نص قبله أو بعده وبلا markdown. إن كان مقطوعًا فأغلقه بأقل تعديل ممكن دون اختراع بيانات.";
 const pjOrFix = createPjOrFix((text) => llm(FIX_SYS, [{ type: "text", text: `أصلح هذا النص ليكون JSON صالحًا فقط:\n\n${text}` }], 6000));
 /* استيراد تحليل أُنتج خارج الموقع (أمر /midad-analyze في Claude Code).
@@ -385,7 +386,8 @@ async function extractPdfText(buf) {
     const t = tc.items.map((i) => i.str).join(" ").replace(/\s+/g, " ").trim();
     chars += t.length; out += `\n\n[صفحة ${p}]\n${t}`;
   }
-  return { text: out.trim(), pages: doc.numPages, chars };
+  const text = out.trim();
+  return { text, pages: doc.numPages, chars, mangled: isMangled(text) };
 }
 const IMG_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 async function readFile(file) {
@@ -394,9 +396,19 @@ async function readFile(file) {
   if (file.size > 6 * 1024 * 1024) throw new Error(`الملف «${name}» حجمه ${fmtSize(file.size)}، والحد المسموح 6 ميجابايت. قسّمه أو اضغطه ثم أعد رفعه.`);
   if (lower.endsWith(".pdf")) {
     const data = await toB64(file);
-    let text = "", pages = 0;
-    try { const r = await extractPdfText(await file.arrayBuffer()); pages = r.pages; if (r.chars / Math.max(1, r.pages) > 120) text = r.text; } catch (e) { console.warn("pdf text", e); }
-    return { id: uid(), name, kind: "pdf", mime: "application/pdf", data, text, pages, size: file.size };
+    let text = "", pages = 0, mangled = false;
+    try {
+      const r = await extractPdfText(await file.arrayBuffer());
+      pages = r.pages; mangled = r.mangled;
+      // نصٌّ مبعثر أسوأ من لا نص: يُهمل فيُرسل الملف نفسه ويقرأه النموذج بصريًا
+      if (r.chars / Math.max(1, r.pages) > 120 && !r.mangled) text = r.text;
+    } catch (e) {
+      const m = String((e && e.name) || (e && e.message) || "");
+      if (/Password|password/.test(m)) throw new Error(`الملف «${name}» محمي بكلمة مرور، فتعذّرت قراءته. افتحه واحفظ نسخة بلا حماية ثم ارفعها.`);
+      if (/Invalid|corrupt/i.test(m)) throw new Error(`الملف «${name}» تالف أو ليس PDF سليمًا. افتحه للتأكد ثم أعد حفظه.`);
+      console.warn("pdf text", e);
+    }
+    return { id: uid(), name, kind: "pdf", mime: "application/pdf", data, text, pages, mangled, size: file.size };
   }
   const ext = (lower.match(/\.(png|jpe?g|webp|gif)$/) || [])[1];
   if (ext) return { id: uid(), name, kind: "image", mime: IMG_MIME[ext] || "image/jpeg", data: await toB64(file), size: file.size };
@@ -966,10 +978,18 @@ function NewCase({ library, onCancel, onCreated, updateCase, setToast }) {
           </ul>
         )}
         {files.some((x) => x.kind === "pdf") && (
-          <label className="flex items-start gap-2 text-xs leading-6 cursor-pointer" style={{ color: C.mute }}>
-            <input type="checkbox" checked={sendRaw} onChange={(e) => setSendRaw(e.target.checked)} className="mt-1.5" />
-            <span>أرسل ملفات PDF كما هي بدل النص المستخرج منها. {files.filter((x) => x.kind === "pdf").every((x) => x.text) ? "استُخرج النص من كل ملفات PDF بنجاح؛ الإرسال كنص أخف وأدق في أرقام الصفحات." : "بعض ملفات PDF مصوّرة بلا نص، وستُرسل كما هي على كل حال."}</span>
-          </label>
+          <>
+            {files.some((x) => x.mangled) && (
+              <div className="text-xs rounded-lg p-3 leading-6" style={{ background: C.amberSoft, color: C.amber }}>
+                خرج نص {files.filter((x) => x.mangled).map((x) => `«${x.name}»`).join("، ")} مبعثرًا عند الاستخراج، وهو أمر شائع في ملفات PDF العربية.
+                فلن يُرسل النص المبعثر؛ سيُرسل الملف نفسه ليقرأه النموذج بصريًا. النتيجة أدق، لكن أرقام الصفحات في المصادر قد تكون أقل ضبطًا.
+              </div>
+            )}
+            <label className="flex items-start gap-2 text-xs leading-6 cursor-pointer" style={{ color: C.mute }}>
+              <input type="checkbox" checked={sendRaw} onChange={(e) => setSendRaw(e.target.checked)} className="mt-1.5" />
+              <span>أرسل ملفات PDF كما هي بدل النص المستخرج منها. {files.filter((x) => x.kind === "pdf").every((x) => x.text) ? "استُخرج النص من كل ملفات PDF بنجاح؛ الإرسال كنص أخف وأدق في أرقام الصفحات." : "بعض الملفات لا نص فيها أو نصها مبعثر، وستُرسل كما هي على كل حال."}</span>
+            </label>
+          </>
         )}
         {err && <div className="text-sm rounded-lg p-3" style={{ background: C.copperSoft, color: C.copper }}>{err}</div>}
         <div className="flex flex-wrap items-center gap-3 text-xs">
