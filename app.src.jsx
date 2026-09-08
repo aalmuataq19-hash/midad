@@ -2183,4 +2183,33 @@ function highlight(text, q) {
   return <>{text.slice(0, i)}<mark style={{ background: C.hl }}>{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length)}</>;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+/* خطأ تصيير واحد كان يترك صفحة بيضاء بلا رسالة ولا مخرج، والقضايا كلها في المتصفح.
+   React لا يمرّر هذه الأخطاء إلى window.onerror، فلا بد من حاجز صريح. */
+class ErrorBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("midad render error:", err, info); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div dir="rtl" className="min-h-screen flex items-center justify-center p-6" style={{ background: C.bg, color: C.ink, fontFamily: "'IBM Plex Sans Arabic', system-ui, sans-serif" }}>
+        <div className="max-w-md w-full rounded-xl p-6 text-center" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+          <AlertTriangle size={28} className="mx-auto mb-3" style={{ color: C.copper }} />
+          <div className="font-bold text-lg mb-2">تعطّلت الشاشة</div>
+          <p className="text-sm leading-7 mb-4" style={{ color: C.mute }}>
+            حدث خلل في عرض هذه الشاشة. <b>قضاياك وملاحظاتك محفوظة في هذا المتصفح ولم تُمس.</b> أعد تحميل الصفحة، وإن تكرر الخلل فارجع إلى الرئيسية وافتح قضية أخرى.
+          </p>
+          <div className="flex flex-wrap gap-3 justify-center">
+            <Btn onClick={() => location.reload()}><RefreshCw size={15} /> أعد تحميل الصفحة</Btn>
+            <Btn kind="ghost" onClick={() => { try { location.hash = ""; } catch {} location.reload(); }}>ارجع إلى الرئيسية</Btn>
+          </div>
+          <details className="mt-4 text-right">
+            <summary className="text-xs cursor-pointer" style={{ color: C.mute }}>تفاصيل تقنية</summary>
+            <pre dir="ltr" className="text-xs mt-2 p-2 rounded overflow-auto" style={{ background: C.grey, maxHeight: 160 }}>{String(this.state.err && (this.state.err.stack || this.state.err.message) || this.state.err)}</pre>
+          </details>
+        </div>
+      </div>
+    );
+  }
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary><App /></ErrorBoundary>);
