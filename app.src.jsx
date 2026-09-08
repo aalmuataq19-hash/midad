@@ -57,12 +57,28 @@ const arNum = (n) => Number(n ?? 0).toLocaleString("ar-EG");
 /* ───────────────────────── التخزين ───────────────────────── */
 const DB = (() => {
   let p = null;
-  const open = () => p || (p = new Promise((res, rej) => { const r = indexedDB.open("midad-al-qadi", 1); r.onupgradeneeded = () => r.result.createObjectStore("kv"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }));
+  // الوعد الفاشل كان يُخزَّن، فيبقى الفتح مرفوضًا إلى آخر الجلسة ولو زال سببه.
+  // ولأن sget/sset يبتلعان الخطأ، كان التطبيق يعمل ويبدو سليمًا وكل شيء يُكتب في الفراغ.
+  const open = () => p || (p = new Promise((res, rej) => {
+    let r; try { r = indexedDB.open("midad-al-qadi", 1); } catch (e) { return rej(e); }
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error("blocked"));
+  }).catch((e) => { p = null; throw e; }));
   const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction("kv", mode); const req = fn(t.objectStore("kv")); t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error); }); };
   return { get: (k) => tx("readonly", (st) => st.get(k)), set: (k, v) => tx("readwrite", (st) => st.put(v, k)), del: (k) => tx("readwrite", (st) => st.delete(k)), keys: () => tx("readonly", (st) => st.getAllKeys()) };
 })();
-const sget = async (k) => { try { const v = await DB.get(k); return v === undefined ? null : v; } catch { return null; } };
-const sset = async (k, v) => { try { await DB.set(k, JSON.parse(JSON.stringify(v))); return true; } catch (e) { console.error(e); return false; } };
+/* تعذّر التخزين ليس تفصيلًا تقنيًا: القضايا كلها في هذا المتصفح، فإن سقط التخزين
+   وجب أن يُقال للقاضي صراحةً بدل أن يعمل ويظن أن عمله محفوظ. */
+const storage = { broken: false, why: "", onBreak: null };
+function markBroken(e) {
+  const msg = String((e && e.name) || (e && e.message) || e || "");
+  storage.why = /Quota|quota/.test(msg) ? "ذاكرة المتصفح ممتلئة." : "متصفحك يمنع التخزين المحلي (قد تكون نافذة تصفح خاص).";
+  if (!storage.broken) { storage.broken = true; if (storage.onBreak) storage.onBreak(); }
+}
+const sget = async (k) => { try { const v = await DB.get(k); return v === undefined ? null : v; } catch (e) { markBroken(e); return null; } };
+const sset = async (k, v) => { try { await DB.set(k, JSON.parse(JSON.stringify(v))); return true; } catch (e) { console.error(e); markBroken(e); return false; } };
 const sdel = async (k) => { try { await DB.del(k); return true; } catch { return false; } };
 const skeys = async () => { try { return (await DB.keys()) || []; } catch { return []; } };
 const ls = { get: (k) => { try { return localStorage.getItem(k) || ""; } catch { return window.__ls?.[k] || ""; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { (window.__ls ||= {})[k] = v; } } };
@@ -587,6 +603,8 @@ function App() {
   const [activeId, setActiveId] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
+  const [broken, setBroken] = useState(storage.broken);
+  useEffect(() => { storage.onBreak = () => setBroken(true); return () => { storage.onBreak = null; }; }, []);
   const saveT = useRef(), saveL = useRef();
 
   useEffect(() => {
@@ -670,6 +688,11 @@ function App() {
         <Workspace c={active} library={library} setLibrary={setLibrary} update={(fn) => updateCase(active.id, fn)} loadFiles={loadFiles}
           onHome={() => setView("home")} onDelete={() => deleteCase(active)} setToast={setToast} />
       ) : null}
+      {broken && (
+        <div className="fixed top-0 left-0 right-0 z-[60] px-4 py-2 text-sm leading-6 text-center" style={{ background: C.copper, color: "#fff" }}>
+          لا يستطيع مِداد الحفظ في هذا المتصفح: {storage.why} عملك الآن <b>لن يُحفظ</b>. أغلق نافذة التصفح الخاص، أو أفرغ مساحة، ثم أعد تحميل الصفحة.
+        </div>
+      )}
       {toast && <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg text-sm fade" style={{ background: C.ink, color: "#fff" }}>{toast}</div>}
     </div>
   );
