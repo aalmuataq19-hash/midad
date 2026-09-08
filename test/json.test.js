@@ -165,3 +165,33 @@ test("مخطط المراحل الست يُقرأ مقطوعًا دون فقد �
   assert.equal(out.pl.length, 1);
   assert.equal(out.pl[0].src.page, 2);
 });
+
+/* ٢٥ — حالات حدية ظهرت في التدقيق: قيم ليست من JSON، وتعليقات، ومقدمة طويلة. */
+test("NaN وInfinity تصير null لا تُفشل القراءة", () => {
+  assert.deepEqual(repairJSON('{"a":NaN,"b":1}'), { a: null, b: 1 });
+  assert.deepEqual(repairJSON('{"a":Infinity,"b":-Infinity}'), { a: null, b: null });
+  assert.deepEqual(repairJSON('{"facts":[{"page":NaN}]}'), { facts: [{ page: null }] });
+});
+
+test("ولا تُمس داخل النصوص", () => {
+  assert.deepEqual(repairJSON('{"a":"قيمة NaN مذكورة في المستند"}'), { a: "قيمة NaN مذكورة في المستند" });
+  assert.deepEqual(repairJSON('{"a":"Infinity Insurance Co"}'), { a: "Infinity Insurance Co" });
+});
+
+test("تعليقات النموذج تُزال", () => {
+  assert.deepEqual(repairJSON('{\n// شرح من النموذج\n"a":1}'), { a: 1 });
+  assert.deepEqual(repairJSON('{/* شرح */"a":1,"b":2}'), { a: 1, b: 2 });
+});
+
+test("والمسار الذي فيه // داخل نص لا يُقص", () => {
+  assert.deepEqual(repairJSON('{"a":"https://example.com/x"}'), { a: "https://example.com/x" });
+});
+
+test("مقدمة فيها عشرات الأقواس قبل الـ JSON الحقيقي", () => {
+  assert.deepEqual(repairJSON("{ ".repeat(30) + 'مقدمة طويلة {"a":1}'), { a: 1 });
+});
+
+test("الأقواس المفردة تبقى للطبقة الثالثة", () => {
+  // إصلاحها محليًا يعني إعادة كتابة النص، وفيه خطر على الاقتباسات العربية
+  assert.throws(() => repairJSON("{'a':1}"), /تعذر إصلاح JSON/);
+});

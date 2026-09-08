@@ -51,6 +51,14 @@ function scan(src, start) {
       continue;
     }
     if (ch === '"') { inStr = true; out += ch; continue; }
+    // تعليقات يضيفها النموذج أحيانًا شرحًا لإجابته، وهي خارج قواعد JSON
+    if (ch === "/" && src[i + 1] === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
+    if (ch === "/" && src[i + 1] === "*") { i += 2; while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++; i++; continue; }
+    // NaN وInfinity ليست قيمًا في JSON، والنموذج يكتبها حين يعجز عن رقم. القيمة الأمينة null.
+    if (ch === "N" || ch === "I" || (ch === "-" && (src[i + 1] === "I"))) {
+      const m = /^(NaN|-?Infinity)/.exec(src.slice(i, i + 10));
+      if (m) { out += "null"; i += m[0].length - 1; continue; }
+    }
     out += ch;
     if (ch === "{" || ch === "[") { stack.push(ch); continue; }
     if (ch === "}" || ch === "]") {
@@ -91,15 +99,18 @@ function fromCandidate(src, start) {
 function repairJSON(t) {
   const src = stripFences(t);
   if (!src) throw new Error("الإجابة فارغة");
-  let tried = 0;
-  for (let i = 0; i < src.length && tried < 25; i++) {
-    const ch = src[i];
-    if (ch !== "{" && ch !== "[") continue;
-    tried++;
+  // مواضع البدء المحتملة: من أول النص، ثم آخر قوس فيه. إجابة مسهبة قد تحمل عشرات
+  // الأقواس في مقدمتها قبل الـ JSON الحقيقي، فالحد الضيق كان يفوّته.
+  const starts = [];
+  for (let i = 0; i < src.length; i++) { const ch = src[i]; if (ch === "{" || ch === "[") starts.push(i); }
+  if (!starts.length) throw new Error("لا يوجد JSON في الإجابة");
+  const order = starts.slice(0, 60);
+  for (let i = starts.length - 1; i >= 0 && order.length < 80; i--) if (!order.includes(starts[i])) order.push(starts[i]);
+  for (const i of order) {
     const r = fromCandidate(src, i);
     if (r.ok && r.value && typeof r.value === "object") return r.value;
   }
-  throw new Error(tried ? "تعذر إصلاح JSON في الإجابة" : "لا يوجد JSON في الإجابة");
+  throw new Error("تعذر إصلاح JSON في الإجابة");
 }
 
 function pj(t) {
