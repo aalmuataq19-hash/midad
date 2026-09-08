@@ -19,6 +19,17 @@ const MAX_TOKENS = num(process.env.MAX_TOKENS, 8000, 256, 200000);
 const RATE = num(process.env.RATE_LIMIT_PER_MINUTE, 30, 0, 100000);
 const MAX_BODY = 64 * 1024 * 1024;
 const UPSTREAM = "https://api.anthropic.com/v1/messages";
+/* وسيط المزوّدين: أغلبهم لا يسمح بالنداء من صفحة ويب، فيمرّ الطلب من هنا.
+   المفتاح يصل في ترويسة x-midad-key، ويُستعمل في هذا الطلب وحده:
+   لا يُخزَّن، ولا يُسجَّل، ولا يعود في أي رسالة خطأ. */
+const { PROVIDERS, PROVIDER_LIST, ALLOWED_BASES, scrub } = require("./src/providers.js");
+function upstreamFor(id, kind) {
+  // القائمة البيضاء تُغلق باب SSRF: لا يُبنى عنوان إلا من الجدول نفسه.
+  const p = PROVIDERS[id];
+  if (!p || !PROVIDER_LIST.includes(id) || !ALLOWED_BASES.includes(p.baseUrl)) return null;
+  if (p.direct) return null;                       // Anthropic تُنادى من المتصفح مباشرة
+  return p.baseUrl + (kind === "models" ? "/models" : p.path);
+}
 
 // الملفات العامة المسموح بتقديمها فقط (البقية، مثل server.js، لا تُعرض)
 const PUBLIC_FILES = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/library/anzima.json": "library/anzima.json" };
@@ -57,10 +68,52 @@ function readBody(req) {
   });
 }
 
+/* وضع «المفتاح الشخصي» لمزوّد غير Anthropic: يمرّر الطلب كما هو إلى عنوان من
+   القائمة البيضاء، بمفتاح صاحبه، بلا كلمة مرور الموقع وبلا مفتاح الخادم. */
+async function handleRelay(req, res, pid) {
+  const key = String(req.headers["x-midad-key"] || "").trim();
+  const kind = String(req.headers["x-midad-kind"] || "chat");
+  const upstream = upstreamFor(pid, kind === "models" ? "models" : "chat");
+  if (!upstream) return fail(res, 400, "midad_request", "مزوّد غير معروف أو لا يمرّ عبر الخادم.");
+  if (!key) return fail(res, 401, "midad_auth", "لم يصل مفتاح المزوّد.");
+  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "x").toString().split(",")[0].trim();
+  if (!rateOk(ip)) return fail(res, 429, "midad_rate", "طلبات كثيرة في وقت قصير.");
+
+  let body = null;
+  if (kind !== "models") {
+    let raw;
+    try { raw = await readBody(req); } catch (e) { return fail(res, 413, "midad_request", e.message === "too_large" ? "حجم الطلب يتجاوز ٦٤ ميجابايت." : "تعذرت قراءة الطلب."); }
+    try { body = JSON.parse(raw); } catch { return fail(res, 400, "midad_request", "صيغة الطلب غير صحيحة."); }
+    if (!body || typeof body !== "object" || !Array.isArray(body.messages)) return fail(res, 400, "midad_request", "الطلب يفتقد messages.");
+    delete body.stream; delete body.metadata; delete body.temperature; delete body.top_p; delete body.top_k;
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 280000);
+  try {
+    const up = await fetch(upstream, {
+      method: kind === "models" ? "GET" : "POST",
+      headers: kind === "models"
+        ? { "Authorization": `Bearer ${key}` }
+        : { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: kind === "models" ? undefined : JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const text = await up.text();
+    // ولو ردّده المزوّد في نصّ خطئه، لا يخرج المفتاح من هنا.
+    send(res, up.status, scrub(text, key), up.headers.get("content-type") || "application/json; charset=utf-8");
+  } catch (e) {
+    fail(res, 502, "midad_upstream", e.name === "AbortError"
+      ? `انتهت مهلة الانتظار من ${PROVIDERS[pid].label}. أعد المحاولة.`
+      : `تعذر وصول الخادم إلى ${PROVIDERS[pid].label}: ${scrub(e.message, key)}`);
+  } finally { clearTimeout(timer); }
+}
+
 async function handleApi(req, res, url) {
   const configured = KEY.startsWith("sk-ant-") && PASS.length >= 6;
-  if (req.method === "GET") return json(res, 200, { ok: true, midad: true, configured });
+  if (req.method === "GET") return json(res, 200, { ok: true, midad: true, configured, providers: PROVIDER_LIST });
   if (req.method !== "POST") return fail(res, 405, "midad_method", "الطريقة غير مسموحة.");
+  const pid = String(req.headers["x-midad-provider"] || "").trim();
+  if (pid && pid !== "anthropic") return handleRelay(req, res, pid);
   if (!KEY.startsWith("sk-ant-")) return fail(res, 500, "midad_config", "لم يُضبط ANTHROPIC_API_KEY في متغيرات البيئة.");
   if (PASS.length < 6) return fail(res, 500, "midad_config", "لم يُضبط ACCESS_PASSWORD (٦ أحرف على الأقل) في متغيرات البيئة.");
   const given = req.headers["x-midad-pass"] || "";
