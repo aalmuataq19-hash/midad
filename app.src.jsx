@@ -99,12 +99,25 @@ const getProvider = () => { const v = ls.get("midad:provider"); return PROVIDER_
 const getModel = () => ls.get("midad:model").trim() || PROVIDERS[getProvider()].defaultModels[0];
 
 /* ───────────────────────── التاريخ الهجري والميلادي ───────────────────────── */
+/* Intl لا يرفع استثناءً إن لم يدعم أم القرى، بل يسقط بصمت إلى تقويم آخر، فكان
+   يُعرض تاريخ هجري ليس أم القرى على أنه كذلك. تاريخ خاطئ في وثيقة قضائية أسوأ من
+   غيابه، فيُتحقق من التقويم الذي استقر عليه المتصفح، وإلا عُرض الميلادي وحده. */
+let umalquraOK = null;
+function hasUmalqura() {
+  if (umalquraOK !== null) return umalquraOK;
+  try {
+    const f = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura", { day: "numeric", month: "long", year: "numeric" });
+    umalquraOK = f.resolvedOptions().calendar === "islamic-umalqura";
+  } catch { umalquraOK = false; }
+  return umalquraOK;
+}
 function dual(iso, fallback) {
   if (!iso) return fallback || "";
   const d = new Date(iso);
   if (isNaN(d)) return fallback || iso;
   try {
     const g = new Intl.DateTimeFormat("ar-EG", { calendar: "gregory", day: "numeric", month: "long", year: "numeric" }).format(d);
+    if (!hasUmalqura()) return fallback ? `${g} — ${fallback}` : g;
     const h = new Intl.DateTimeFormat("ar-SA-u-ca-islamic-umalqura", { day: "numeric", month: "long", year: "numeric" }).format(d);
     return `${g} — ${h}`;
   } catch { return fallback || iso; }
@@ -1340,7 +1353,7 @@ function Overview({ c, a, update }) {
               {editing === i ? (
                 <input autoFocus defaultValue={it.title} onBlur={(e) => { const v = e.target.value.trim(); setIssues(a.issues.map((x, j) => j === i ? { ...x, title: v || x.title } : x)); setEditing(null); }} onKeyDown={(e) => e.key === "Enter" && e.target.blur()} className="w-full bg-transparent outline-none" />
               ) : <span>{it.title}</span>}
-              <div className="absolute top-2 left-2 hidden group-hover:flex gap-1">
+              <div className="absolute top-2 left-2 flex md:hidden md:group-hover:flex gap-1">
                 <button onClick={() => setEditing(i)} className="text-xs px-2 py-0.5 rounded" style={{ background: C.grey }}>تعديل</button>
                 <button onClick={() => setIssues(a.issues.filter((_, j) => j !== i))} className="text-xs px-2 py-0.5 rounded" style={{ background: C.grey, color: C.copper }}>حذف</button>
               </div>
